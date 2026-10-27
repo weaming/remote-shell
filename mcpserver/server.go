@@ -653,7 +653,7 @@ func (s *Server) listRuns(_ context.Context, _ *mcp.CallToolRequest, _ struct{})
 	lines := make([]string, 0, len(snapshots))
 	for _, snap := range snapshots {
 		entries = append(entries, statusOf(snap))
-		lines = append(lines, fmt.Sprintf("%s %s exit=%d %s", snap.ID, snap.State, snap.ExitCode, snap.CWD))
+		lines = append(lines, describeRun(snap))
 	}
 	text := "no runs yet"
 	if len(lines) > 0 {

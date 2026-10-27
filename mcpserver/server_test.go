@@ -81,6 +81,10 @@ func TestToolsRunAndInspectOneCommand(t *testing.T) {
 		t.Fatalf("unexpected run status: %v", status)
 	}
 	listed := structured(t, callTool(t, session, "list_runs", map[string]any{}))
+	if text := resultText(callTool(t, session, "list_runs", map[string]any{})); !strings.Contains(text, "run="+runID+" ") ||
+		!strings.Contains(text, " name=test-agent ") || !strings.Contains(text, " state=") {
+		t.Fatalf("list_runs text = %q, want key=value fields", text)
+	}
 	if runs, ok := listed["runs"].([]any); !ok || len(runs) != 1 {
 		t.Fatalf("list_runs = %v, want one run", listed["runs"])
 	}
