@@ -234,6 +234,13 @@ func (s *Server) HTTPHandler(token string) http.Handler {
 		// protocol revision usable: the stateful transport still stops at
 		// 2025-11-25.
 		Stateless: true,
+		// The transport's DNS-rebinding check rejects a foreign Host on a
+		// loopback connection, which breaks every proxy a container uses to
+		// reach the host. It protects nothing here: a browser cannot talk to
+		// this endpoint anyway, because application/json needs a preflight the
+		// handler answers with 405 and any simple content type is refused with
+		// 415. The real gate is the optional bearer token.
+		DisableLocalhostProtection: true,
 	})
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", requireBearer(token, handler))

@@ -234,6 +234,35 @@ func TestHTTPServesOnlyTheSupportedRevisions(t *testing.T) {
 	}
 }
 
+// A container reaches a host-bound bridge as host.docker.internal, so a foreign
+// Host header must not be refused: the transport's rebinding check is off by
+// design, because a browser cannot send this content type anyway.
+func TestHTTPAcceptsForeignHost(t *testing.T) {
+	bridge, err := New(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(bridge.HTTPHandler(""))
+	defer httpServer.Close()
+
+	request, err := http.NewRequest(http.MethodPost, httpServer.URL+"/mcp",
+		strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Host = "host.docker.internal:3103"
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json, text/event-stream")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.StatusCode)
+	}
+}
+
 func TestHTTPBearerTokenIsRequired(t *testing.T) {
 	bridge, err := New(Config{})
 	if err != nil {
