@@ -37,12 +37,8 @@ type Frame struct {
 	Payload []byte
 }
 
-// ShellRequest asks the agent to run one command. The run ID is assigned by the
-// agent, not by the caller.
-type ShellRequest struct {
-	ClientID string      `json:"client_id,omitempty"`
-	Command  CommandSpec `json:"command"`
-}
+// A shell request frame carries a CommandSpec. The agent identifies the caller
+// from the certificate it just verified, so no client ID travels in the frame.
 
 // ShellStarted is the first frame the agent sends for an accepted run.
 type ShellStarted struct {
@@ -99,10 +95,9 @@ type ShellList struct {
 	Shells []execution.Shell `json:"shells"`
 }
 
-// OutputChunk is one decoded output frame; the run it belongs to is implied by
-// the stream it arrived on.
+// OutputChunk is one decoded output frame. The run it belongs to, and its place
+// in the sequence, are implied by the QUIC stream it arrived on.
 type OutputChunk struct {
-	Seq    uint64
 	Stream execution.Stream
 	Data   []byte
 }
@@ -154,7 +149,7 @@ func UnmarshalPayload(frame Frame, target any) error {
 	return nil
 }
 
-// EncodeOutput packs one output chunk as stream code, sequence and raw bytes.
+// EncodeOutput packs one output chunk as stream code and raw bytes.
 func EncodeOutput(chunk execution.Output) ([]byte, error) {
 	if chunk.Stream != execution.StreamStdout && chunk.Stream != execution.StreamStderr {
 		return nil, fmt.Errorf("unsupported output stream %q", chunk.Stream)
@@ -163,16 +158,15 @@ func EncodeOutput(chunk execution.Output) ([]byte, error) {
 	if chunk.Stream == execution.StreamStderr {
 		streamCode = 2
 	}
-	payload := make([]byte, 9+len(chunk.Data))
+	payload := make([]byte, 1+len(chunk.Data))
 	payload[0] = streamCode
-	binary.BigEndian.PutUint64(payload[1:9], chunk.Seq)
-	copy(payload[9:], chunk.Data)
+	copy(payload[1:], chunk.Data)
 	return payload, nil
 }
 
 func DecodeOutput(payload []byte) (OutputChunk, error) {
-	if len(payload) < 9 {
-		return OutputChunk{}, fmt.Errorf("output frame is shorter than its header")
+	if len(payload) < 1 {
+		return OutputChunk{}, fmt.Errorf("output frame is empty")
 	}
 	stream := execution.StreamStdout
 	switch payload[0] {
@@ -183,9 +177,8 @@ func DecodeOutput(payload []byte) (OutputChunk, error) {
 		return OutputChunk{}, fmt.Errorf("unknown output stream code %d", payload[0])
 	}
 	return OutputChunk{
-		Seq:    binary.BigEndian.Uint64(payload[1:9]),
 		Stream: stream,
-		Data:   append([]byte(nil), payload[9:]...),
+		Data:   append([]byte(nil), payload[1:]...),
 	}, nil
 }
 

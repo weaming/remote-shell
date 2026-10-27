@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-func TestRunStreamsStdoutAndStderrWithSequence(t *testing.T) {
+func TestRunStreamsStdoutAndStderrInOrder(t *testing.T) {
 	if _, err := shellCommand(ShellBash, "true"); err != nil {
 		t.Skip("bash is not installed")
 	}
@@ -41,10 +41,7 @@ func TestRunStreamsStdoutAndStderrWithSequence(t *testing.T) {
 		t.Fatalf("got %d output chunks, want stdout and stderr", len(outputs))
 	}
 	streams := map[Stream]string{}
-	for index, output := range outputs {
-		if output.Seq != uint64(index+1) {
-			t.Fatalf("chunk %d has sequence %d", index, output.Seq)
-		}
+	for _, output := range outputs {
 		streams[output.Stream] += string(output.Data)
 	}
 	if streams[StreamStdout] != "stdout" || streams[StreamStderr] != "stderr" {

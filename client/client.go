@@ -24,8 +24,7 @@ const (
 // Client is one QUIC connection to an agent. A connection carries a single
 // run per call and is cheap to recreate, so callers dial per operation.
 type Client struct {
-	conn     *quic.Conn
-	clientID string
+	conn *quic.Conn
 }
 
 // Dial connects to an agent at address (host:port). An empty private key
@@ -51,12 +50,7 @@ func Dial(ctx context.Context, address string, privateKey ed25519.PrivateKey) (*
 	if err != nil {
 		return nil, fmt.Errorf("dial agent %s: %w", address, err)
 	}
-	// The agent derives the same ID from the certificate it just verified.
-	clientID := ""
-	if len(privateKey) == ed25519.PrivateKeySize {
-		clientID = identity.ClientID(privateKey.Public().(ed25519.PublicKey))
-	}
-	return &Client{conn: connection, clientID: clientID}, nil
+	return &Client{conn: connection}, nil
 }
 
 func (c *Client) Close() error {
@@ -122,10 +116,7 @@ func (c *Client) StartShell(ctx context.Context, command execution.Command, emit
 	if err != nil {
 		return nil, fmt.Errorf("open run stream: %w", err)
 	}
-	request, err := protocol.MarshalFrame(protocol.FrameShellRequest, protocol.ShellRequest{
-		ClientID: c.clientID,
-		Command:  protocol.NewCommandSpec(command),
-	})
+	request, err := protocol.MarshalFrame(protocol.FrameShellRequest, protocol.NewCommandSpec(command))
 	if err != nil {
 		_ = stream.Close()
 		stream.CancelRead(0)
@@ -197,7 +188,6 @@ func (r *Run) drain(ctx context.Context, emit func(execution.Output) error) {
 			}
 			if err := emit(execution.Output{
 				RunID:  r.ID,
-				Seq:    chunk.Seq,
 				Stream: chunk.Stream,
 				Data:   chunk.Data,
 				At:     time.Now(),

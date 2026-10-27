@@ -10,10 +10,10 @@ import (
 	"remote-shell/execution"
 )
 
-// requestLog carries the identity of one inbound request so its start line and
-// its result line share an ID that a log reader can match on.
+// requestLog carries what a request needs for its start line and its result
+// line. A shell run is identified by the run ID the agent assigned; a shell-list
+// request is instantaneous and logs a single line.
 type requestLog struct {
-	id      uint64
 	started time.Time
 	kind    string
 	runID   string
@@ -23,8 +23,8 @@ type requestLog struct {
 	exit    int
 }
 
-func newRequestLog(id uint64) *requestLog {
-	return &requestLog{id: id, started: time.Now()}
+func newRequestLog() *requestLog {
+	return &requestLog{started: time.Now()}
 }
 
 // countOutput accumulates what was forwarded to the client, so the result line
@@ -42,16 +42,15 @@ func (r *requestLog) countOutput(stream execution.Stream, size int) {
 func (r *requestLog) start(kind, runID string, fields ...string) {
 	r.kind = kind
 	r.runID = runID
-	parts := append([]string{
-		fmt.Sprintf("req=%d", r.id),
-		"event=start",
-		"kind=" + kind,
-	}, fields...)
-	if r.remote != "" {
-		parts = append(parts, "remote="+r.remote)
-	}
+	// The run ID leads the line so a reader can grep or sort by it directly.
+	parts := make([]string, 0, 6+len(fields))
 	if runID != "" {
 		parts = append(parts, "run="+runID)
+	}
+	parts = append(parts, "event=start", "kind="+kind)
+	parts = append(parts, fields...)
+	if r.remote != "" {
+		parts = append(parts, "remote="+r.remote)
 	}
 	log.Print(strings.Join(parts, " "))
 }
@@ -61,17 +60,21 @@ func (r *requestLog) setExit(code int) {
 	r.exit = code
 }
 
-// finish logs the outcome with the request ID and the time it took.
+// finish logs the outcome with the run ID and the time it took. Instantaneous
+// requests log this line alone, so they carry their remote address here.
 func (r *requestLog) finish(state, detail string) {
-	parts := []string{
-		fmt.Sprintf("req=%d", r.id),
-		"event=done",
-		"kind=" + orUnknown(r.kind),
-		"state=" + state,
-		"duration=" + time.Since(r.started).Round(time.Millisecond).String(),
-	}
+	parts := make([]string, 0, 8)
 	if r.runID != "" {
 		parts = append(parts, "run="+r.runID)
+	}
+	parts = append(parts,
+		"event=done",
+		"kind="+orUnknown(r.kind),
+		"state="+state,
+		"duration="+time.Since(r.started).Round(time.Millisecond).String(),
+	)
+	if r.runID == "" && r.remote != "" {
+		parts = append(parts, "remote="+r.remote)
 	}
 	if r.kind == "shell" {
 		parts = append(parts, fmt.Sprintf("exit=%d", r.exit))
@@ -86,17 +89,12 @@ func (r *requestLog) finish(state, detail string) {
 }
 
 // describeCommand lists what the request asked for, without quoting the script.
-func describeCommand(clientID string, command execution.Command) []string {
-	fields := make([]string, 0, 5)
-	if clientID != "" {
-		fields = append(fields, "client="+clientID)
+func describeCommand(command execution.Command) []string {
+	return []string{
+		"shell=" + string(command.Shell),
+		"cwd=" + command.CWD,
+		"timeout=" + command.Timeout.String(),
 	}
-	fields = append(fields,
-		"shell="+string(command.Shell),
-		"cwd="+command.CWD,
-		"timeout="+command.Timeout.String(),
-	)
-	return fields
 }
 
 func orUnknown(value string) string {

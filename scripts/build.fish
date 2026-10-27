@@ -83,14 +83,19 @@ function build_target
     set -l goos (string split / $target)[1]
     set -l goarch (string split / $target)[2]
     set -l output "$OUT_DIR/remote-shell-$goos-$goarch"
+    # Build beside the target and rename, so a rebuild never overwrites the
+    # pages of a copy that is still running: macOS kills such a process with
+    # "Code Signature Invalid" once it faults a page back in.
+    set -l staging "$output.new"
     mkdir -p (dirname "$output")
     env CGO_ENABLED="$CGO_ENABLED" GOOS="$goos" GOARCH="$goarch" \
         "$GO" build $GOFLAGS -ldflags "$LDFLAGS -X remote-shell/agent.EmbeddedTrustedClientPublicKeyHex=$public_key" \
-        -o "$output" ./cmd/remote-shell
+        -o "$staging" ./cmd/remote-shell
     or begin
-        rm -f "$output"
+        rm -f "$staging"
         fail "build $target failed"
     end
+    mv -f "$staging" "$output"
     echo "built $output"
 end
 

@@ -66,14 +66,11 @@ func TestAgentStreamsAuthenticatedRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request, err := protocol.MarshalFrame(protocol.FrameShellRequest, protocol.ShellRequest{
-		ClientID: identity.ClientID(publicKey),
-		Command: protocol.CommandSpec{
-			Shell:     execution.ShellBash,
-			Script:    "printf hello; printf problem >&2",
-			CWD:       t.TempDir(),
-			TimeoutMS: 5000,
-		},
+	request, err := protocol.MarshalFrame(protocol.FrameShellRequest, protocol.CommandSpec{
+		Shell:     execution.ShellBash,
+		Script:    "printf hello; printf problem >&2",
+		CWD:       t.TempDir(),
+		TimeoutMS: 5000,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -85,7 +82,6 @@ func TestAgentStreamsAuthenticatedRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr string
-	var lastSequence uint64
 responseLoop:
 	for {
 		frame, readErr := protocol.ReadFrame(stream)
@@ -100,10 +96,6 @@ responseLoop:
 			if decodeErr != nil {
 				t.Fatal(decodeErr)
 			}
-			if chunk.Seq <= lastSequence {
-				t.Fatalf("output sequence %d did not increase after %d", chunk.Seq, lastSequence)
-			}
-			lastSequence = chunk.Seq
 			if chunk.Stream == execution.StreamStdout {
 				stdout += string(chunk.Data)
 			} else {
@@ -177,11 +169,8 @@ responseLoop:
 		if streamErr != nil {
 			t.Fatal(streamErr)
 		}
-		badRequest, encodeErr := protocol.MarshalFrame(protocol.FrameShellRequest, protocol.ShellRequest{
-			ClientID: identity.ClientID(wrongPublicKey),
-			Command: protocol.CommandSpec{
-				Shell: execution.ShellBash, Script: "exit 0", CWD: t.TempDir(),
-			},
+		badRequest, encodeErr := protocol.MarshalFrame(protocol.FrameShellRequest, protocol.CommandSpec{
+			Shell: execution.ShellBash, Script: "exit 0", CWD: t.TempDir(),
 		})
 		if encodeErr != nil {
 			t.Fatal(encodeErr)
@@ -210,11 +199,8 @@ responseLoop:
 	if err != nil {
 		t.Fatal(err)
 	}
-	cancelRequest, err := protocol.MarshalFrame(protocol.FrameShellRequest, protocol.ShellRequest{
-		ClientID: identity.ClientID(publicKey),
-		Command: protocol.CommandSpec{
-			Shell: execution.ShellBash, Script: "sleep 30", CWD: t.TempDir(), TimeoutMS: 30000,
-		},
+	cancelRequest, err := protocol.MarshalFrame(protocol.FrameShellRequest, protocol.CommandSpec{
+		Shell: execution.ShellBash, Script: "sleep 30", CWD: t.TempDir(), TimeoutMS: 30000,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -296,10 +282,8 @@ func TestAgentAllowsExplicitUnauthenticatedMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request, err := protocol.MarshalFrame(protocol.FrameShellRequest, protocol.ShellRequest{
-		Command: protocol.CommandSpec{
-			Shell: execution.ShellBash, Script: "exit 0", CWD: t.TempDir(),
-		},
+	request, err := protocol.MarshalFrame(protocol.FrameShellRequest, protocol.CommandSpec{
+		Shell: execution.ShellBash, Script: "exit 0", CWD: t.TempDir(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -545,11 +529,8 @@ func TestAgentAcceptsQueuedRequestAfterStreamSlotFrees(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request, err := protocol.MarshalFrame(protocol.FrameShellRequest, protocol.ShellRequest{
-		ClientID: identity.ClientID(publicKey),
-		Command: protocol.CommandSpec{
-			Shell: execution.ShellBash, Script: "exit 0", CWD: t.TempDir(), TimeoutMS: 5000,
-		},
+	request, err := protocol.MarshalFrame(protocol.FrameShellRequest, protocol.CommandSpec{
+		Shell: execution.ShellBash, Script: "exit 0", CWD: t.TempDir(), TimeoutMS: 5000,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -802,11 +783,8 @@ func openRunStream(t *testing.T, connection *quic.Conn, clientID, runID, script 
 	if err != nil {
 		return nil, err
 	}
-	request, err := protocol.MarshalFrame(protocol.FrameShellRequest, protocol.ShellRequest{
-		ClientID: clientID,
-		Command: protocol.CommandSpec{
-			Shell: execution.ShellBash, Script: script, CWD: t.TempDir(), TimeoutMS: 5000,
-		},
+	request, err := protocol.MarshalFrame(protocol.FrameShellRequest, protocol.CommandSpec{
+		Shell: execution.ShellBash, Script: script, CWD: t.TempDir(), TimeoutMS: 5000,
 	})
 	if err != nil {
 		return nil, err
@@ -844,7 +822,7 @@ func dialAgent(t *testing.T, address string, tlsConfig *tls.Config) (*quic.Conn,
 
 // The start line and the result line of one request must share a request ID so
 // a log reader can match them.
-func TestAgentLogsRequestStartAndResultWithSharedID(t *testing.T) {
+func TestAgentLogsRunStartAndResult(t *testing.T) {
 	if !containsShell(execution.AvailableShells(), execution.ShellBash) {
 		t.Skip("bash is not installed")
 	}
@@ -857,6 +835,7 @@ func TestAgentLogsRequestStartAndResultWithSharedID(t *testing.T) {
 		t.Fatal(err)
 	}
 	server, err := New(Config{
+		Name:             "log-probe",
 		ListenAddress:    fmt.Sprintf("127.0.0.1:%d", port),
 		StateDir:         t.TempDir(),
 		TrustedClientKey: publicKey,
@@ -895,20 +874,16 @@ func TestAgentLogsRequestStartAndResultWithSharedID(t *testing.T) {
 	}
 	defer connection.CloseWithError(0, "test complete")
 
-	// One successful run, one failing run, and one shell-list request.
-	runShell := func(id, script string) {
+	runShell := func(script string) {
 		stream, err := connection.OpenStreamSync(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer stream.Close()
-		frame, err := protocol.MarshalFrame(protocol.FrameShellRequest, protocol.ShellRequest{
-			ClientID: identity.ClientID(publicKey),
-			Command: protocol.CommandSpec{
-				Shell:  execution.ShellBash,
-				Script: script,
-				CWD:    t.TempDir(),
-			},
+		frame, err := protocol.MarshalFrame(protocol.FrameShellRequest, protocol.CommandSpec{
+			Shell:  execution.ShellBash,
+			Script: script,
+			CWD:    t.TempDir(),
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -925,13 +900,10 @@ func TestAgentLogsRequestStartAndResultWithSharedID(t *testing.T) {
 			if frame.Type == protocol.FrameShellResult {
 				return
 			}
-			if frame.Type == protocol.FrameShellStarted {
-				continue
-			}
 		}
 	}
-	runShell("logged-ok", "printf hello")
-	runShell("logged-fail", "printf boom >&2; exit 4")
+	runShell("printf hello")
+	runShell("printf boom >&2; exit 4")
 
 	stream, err := connection.OpenStreamSync(context.Background())
 	if err != nil {
@@ -950,25 +922,35 @@ func TestAgentLogsRequestStartAndResultWithSharedID(t *testing.T) {
 	}
 	stream.Close()
 
-	starts, dones := parseRequestLogs(captured.String())
-	if len(starts) != 3 || len(dones) != 3 {
-		t.Fatalf("starts=%v dones=%v, want three matched pairs in:\n%s", starts, dones, captured.String())
+	runs, instant := parseRequestLogs(captured.String())
+	if len(runs) != 2 {
+		t.Fatalf("runs=%v, want two shell runs:\n%s", runs, captured.String())
 	}
-	counts := make(map[string]int, 3)
-	for id, fields := range dones {
-		if _, ok := starts[id]; !ok {
-			t.Fatalf("result req=%s has no start line:\n%s", id, captured.String())
+	for runID, lines := range runs {
+		if !isRunID(runID) {
+			t.Fatalf("run ID %q is not the agent-assigned form:\n%s", runID, captured.String())
 		}
-		if fields["duration"] == "" {
-			t.Fatalf("result req=%s has no duration:\n%s", id, captured.String())
+		if len(lines) != 2 || lines[0]["event"] != "start" || lines[1]["event"] != "done" {
+			t.Fatalf("run %s logged %v, want start then result", runID, lines)
 		}
-		counts[fields["state"]]++
-		if starts[id]["kind"] == "shell" && !isRunID(starts[id]["run"]) {
-			t.Fatalf("req=%s did not log the agent-assigned run ID: %v", id, starts[id])
+		for _, line := range lines {
+			if !strings.HasPrefix(line["_line"], "run="+runID+" ") {
+				t.Fatalf("line does not start with its run ID: %q", line["_line"])
+			}
 		}
 	}
-	if counts["succeeded"] != 2 || counts["failed"] != 1 {
-		t.Fatalf("states = %v, want two succeeded and one failed:\n%s", counts, captured.String())
+	states := map[string]int{}
+	for _, lines := range runs {
+		states[lines[1]["state"]]++
+	}
+	if states["succeeded"] != 1 || states["failed"] != 1 {
+		t.Fatalf("states = %v, want one succeeded and one failed:\n%s", states, captured.String())
+	}
+	if len(instant) != 1 {
+		t.Fatalf("shell-list logged %d lines, want one:\n%s", len(instant), captured.String())
+	}
+	if instant[0]["kind"] != "shells" || instant[0]["state"] != "succeeded" || instant[0]["remote"] == "" {
+		t.Fatalf("shell-list line is incomplete: %v", instant[0])
 	}
 	if !strings.Contains(captured.String(), "exit=4") {
 		t.Fatalf("failing run did not log its exit code:\n%s", captured.String())
@@ -989,28 +971,33 @@ func isRunID(value string) bool {
 	return true
 }
 
-// parseRequestLogs indexes start and result lines by request ID.
-func parseRequestLogs(output string) (map[string]map[string]string, map[string]map[string]string) {
-	starts := make(map[string]map[string]string)
-	dones := make(map[string]map[string]string)
+// parseRequestLogs splits the captured log into shell runs keyed by their run ID
+// and the single-line records of instantaneous requests.
+func parseRequestLogs(output string) (map[string][]map[string]string, []map[string]string) {
+	runs := make(map[string][]map[string]string)
+	var instant []map[string]string
 	for _, line := range strings.Split(output, "\n") {
 		if !strings.Contains(line, "event=") {
 			continue
 		}
-		fields := make(map[string]string)
+		trimmed := strings.TrimSpace(line)
+		if index := strings.Index(trimmed, "run="); index >= 0 {
+			trimmed = trimmed[index:]
+		} else if index := strings.Index(trimmed, "event="); index >= 0 {
+			trimmed = trimmed[index:]
+		}
+		fields := map[string]string{"_line": trimmed}
 		for _, token := range strings.Fields(line) {
 			key, value, ok := strings.Cut(token, "=")
 			if ok {
 				fields[key] = value
 			}
 		}
-		id := fields["req"]
-		switch fields["event"] {
-		case "start":
-			starts[id] = fields
-		case "done":
-			dones[id] = fields
+		if fields["run"] != "" {
+			runs[fields["run"]] = append(runs[fields["run"]], fields)
+			continue
 		}
+		instant = append(instant, fields)
 	}
-	return starts, dones
+	return runs, instant
 }

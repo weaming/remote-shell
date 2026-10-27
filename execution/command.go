@@ -42,10 +42,10 @@ type Command struct {
 	Timeout time.Duration
 }
 
-// Output is one chunk forwarded from a running command.
+// Output is one chunk forwarded from a running command. Order is the order the
+// agent wrote the chunks: they all share one ordered stream.
 type Output struct {
 	RunID  string
-	Seq    uint64
 	Stream Stream
 	Data   []byte
 	At     time.Time
@@ -66,7 +66,6 @@ type OutputFunc func(context.Context, Output) error
 
 type outputEmitter struct {
 	runID string
-	seq   uint64
 	mu    sync.Mutex
 	write OutputFunc
 }
@@ -77,10 +76,8 @@ func (e *outputEmitter) emit(ctx context.Context, stream Stream, data []byte) er
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.seq++
 	return e.write(ctx, Output{
 		RunID:  e.runID,
-		Seq:    e.seq,
 		Stream: stream,
 		Data:   append([]byte(nil), data...),
 		At:     time.Now(),

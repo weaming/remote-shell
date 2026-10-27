@@ -60,8 +60,6 @@ type Agent struct {
 	tls      *tls.Config
 	runs     chan struct{}
 	streams  chan struct{}
-	// nextRequestID numbers inbound requests so log lines can be matched.
-	nextRequestID atomic.Uint64
 }
 
 func New(config Config) (*Agent, error) {
@@ -352,7 +350,7 @@ func (a *Agent) beginStream(connectionCtx context.Context, connection *quic.Conn
 	onStart()
 	defer onEnd()
 
-	request := newRequestLog(a.nextRequestID.Add(1))
+	request := newRequestLog()
 	request.remote = connection.RemoteAddr().String()
 	frame, err := protocol.ReadFrame(stream)
 	if err != nil {
@@ -399,8 +397,9 @@ func (a *Agent) acquireStreamSlot(ctx context.Context) bool {
 }
 
 func (a *Agent) handleStream(connectionCtx context.Context, connection *quic.Conn, stream *quic.Stream, frame protocol.Frame, request *requestLog) {
-	clientID, err := a.authenticatedClientID(connection)
-	if err != nil {
+	// The TLS handshake already rejected an untrusted key; re-check here so a
+	// future transport change cannot silently drop the requirement.
+	if err := a.authenticateClient(connection); err != nil {
 		a.writeError(stream, err)
 		request.finish("failed", err.Error())
 		return
@@ -417,25 +416,15 @@ func (a *Agent) handleStream(connectionCtx context.Context, connection *quic.Con
 		return
 	}
 
-	var shellRequest protocol.ShellRequest
-	if err := protocol.UnmarshalPayload(frame, &shellRequest); err != nil {
+	// The caller's identity comes from the certificate verified above; nothing
+	// about it travels in the request frame.
+	var spec protocol.CommandSpec
+	if err := protocol.UnmarshalPayload(frame, &spec); err != nil {
 		a.writeError(stream, err)
 		request.finish("failed", err.Error())
 		return
 	}
-	if clientID != "" && shellRequest.ClientID != clientID {
-		cause := fmt.Errorf("client ID does not match the authenticated key")
-		a.writeError(stream, cause)
-		request.finish("failed", cause.Error())
-		return
-	}
-	if clientID == "" && shellRequest.ClientID != "" {
-		cause := fmt.Errorf("client ID supplied without client authentication")
-		a.writeError(stream, cause)
-		request.finish("failed", cause.Error())
-		return
-	}
-	command, err := shellRequest.Command.ExecutionCommand()
+	command, err := spec.ExecutionCommand()
 	if err != nil {
 		a.writeError(stream, err)
 		request.finish("failed", err.Error())
@@ -447,7 +436,7 @@ func (a *Agent) handleStream(connectionCtx context.Context, connection *quic.Con
 		request.finish("failed", err.Error())
 		return
 	}
-	request.start("shell", runID, describeCommand(clientID, command)...)
+	request.start("shell", runID, describeCommand(command)...)
 
 	runWait := time.NewTimer(runSlotWait)
 	defer runWait.Stop()
@@ -541,7 +530,7 @@ func newRunID() (string, error) {
 // serveShellList answers a shell-list request and logs it like any other
 // request.
 func (a *Agent) serveShellList(stream *quic.Stream, request *requestLog) {
-	request.start("shells", "")
+	request.kind = "shells"
 	shells := execution.AvailableShells()
 	names := make([]string, len(shells))
 	for index, shell := range shells {
@@ -559,22 +548,25 @@ func (a *Agent) serveShellList(stream *quic.Stream, request *requestLog) {
 	request.finish("succeeded", strings.Join(names, ","))
 }
 
-func (a *Agent) authenticatedClientID(connection *quic.Conn) (string, error) {
+// authenticateClient re-checks the peer key. With a single trusted key the
+// derived client ID would be a constant, so nothing about the caller is kept or
+// logged.
+func (a *Agent) authenticateClient(connection *quic.Conn) error {
 	if len(a.config.TrustedClientKey) == 0 {
-		return "", nil
+		return nil
 	}
 	state := connection.ConnectionState().TLS
 	if len(state.PeerCertificates) == 0 {
-		return "", fmt.Errorf("client certificate is required")
+		return fmt.Errorf("client certificate is required")
 	}
 	publicKey, ok := state.PeerCertificates[0].PublicKey.(ed25519.PublicKey)
 	if !ok {
-		return "", fmt.Errorf("client certificate must use Ed25519")
+		return fmt.Errorf("client certificate must use Ed25519")
 	}
 	if subtle.ConstantTimeCompare(publicKey, a.config.TrustedClientKey) != 1 {
-		return "", fmt.Errorf("client public key is not trusted")
+		return fmt.Errorf("client public key is not trusted")
 	}
-	return identity.ClientID(publicKey), nil
+	return nil
 }
 
 func (a *Agent) readRunControl(cancel context.CancelFunc, stream *quic.Stream) {

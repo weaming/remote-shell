@@ -39,7 +39,7 @@ Agent 不缓存断线后的输出；输出实时流式发送，使用有界内�
 
 ### 身份与鉴权
 
-Agent 可选验证客户端身份：Agent 二进制内嵌一个 Ed25519 客户端公钥；客户端用对应私钥生成 TLS 客户端证书。Agent 在 TLS 校验公钥，并在运行请求中校验 `client_id` 等于该公钥 SHA-256 指纹。客户端私钥由 `keygen` 命令生成并以仅用户可读权限保存；私钥不编入二进制。鉴权默认关闭必须显式传 `--allow-unauthenticated`；启用鉴权时通过构建参数嵌入公钥。
+Agent 可选验证客户端身份：Agent 二进制内嵌一个 Ed25519 客户端公钥；客户端用对应私钥生成 TLS 客户端证书。Agent 在 TLS 握手中校验客户端证书里的公钥是否等于内嵌公钥；因为只有一把可信公钥，派生出的客户端 ID 是常量，既不写进请求帧也不写进日志。客户端私钥由 `keygen` 命令生成并以仅用户可读权限保存；私钥不编入二进制。鉴权默认关闭必须显式传 `--allow-unauthenticated`；启用鉴权时通过构建参数嵌入公钥。
 
 Agent 首次运行自动生成并持久化服务端 Ed25519 身份，ID 是公钥指纹，并通过 mDNS 公布。按用户明确选择，客户端**不验证执行端证书/身份**。因此客户端到 Agent 的 TLS 连接并不具备对端认证：恶意假 Agent 或中间人仍可能诱骗客户端提交命令、读取命令内容或伪造响应。客户端公钥认证只限制谁能让真实 Agent 执行命令，不能替代客户端验证服务端身份；这是已接受的安全限制，不应宣称完整防 MITM。
 
@@ -60,8 +60,8 @@ Agent 为命令创建受管进程组/等效运行边界。取消、超时、断�
 1. **语言与依赖**：Go；QUIC 使用 `github.com/quic-go/quic-go`，mDNS 使用 `github.com/grandcat/zeroconf`。
 2. **发现**：发布/发现 `_remote-shell._udp` DNS-SD 服务，TXT 公布协议版本、Agent 稳定 ID、人类可读名称 `name` 和是否要求客户端鉴权；实例名为 `RemoteShell-<名称>-<ID 后缀>`，名称经清洗（小写字母/数字/下划线/短横线），两个同名 Agent 仍靠 ID 后缀区分。发现信息不作为信任凭据。
    mDNS 注册失败（如容器内无多播）只记录日志并继续服务，不阻止 Agent 启动。
-3. **线协议**：ALPN 为 `remote-shell/1`。每帧为 1 字节类型 + 4 字节大端长度 + payload；控制消息用 JSON，最大 4 MiB；stdout/stderr 用二进制帧避免 Base64 膨胀。运行请求的 stdin 与其余控制字段同帧 JSON 传输，受同一 4 MiB 上限约束。请求使用 `timeout_ms`，省略/0 表示默认值。单次运行的 stream 首帧为运行请求（只含一条命令），Agent 随后先回一帧运行 ID，再回输出块与结束结果；客户端取消即关闭 stream 写方向。Agent 先读取首帧再占用全局 stream 配额；读首帧超时 5 秒，未打开运行流（stream）的连接 10 秒后关闭，最后一次运行结束后的空闲连接约 200 ms 后关闭。配额满时请求排队：stream 槽最多等 50 ms、run 槽最多等 100 ms，超时才返回错误帧。单连接获得的 QUIC stream 信用额度等于 stream 上限，因此 stream 槽排队只在多个连接之间发生。
-4. **输出排序**：输出帧包含运行内递增 `seq`、stdout/stderr 类型和原始字节。该序号代表 Agent 收集两个管道时的观察顺序，不承诺进程跨管道的绝对写入时序。
+3. **线协议**：ALPN 为 `remote-shell/1`。每帧为 1 字节类型 + 4 字节大端长度 + payload；控制消息用 JSON，最大 4 MiB；stdout/stderr 用二进制帧（1 字节流标识 + 原始字节）避免 Base64 膨胀。运行请求的 stdin 与其余控制字段同帧 JSON 传输，受同一 4 MiB 上限约束。请求使用 `timeout_ms`，省略/0 表示默认值。单次运行的 stream 首帧为运行请求（直接是 `CommandSpec`，只含一条命令；调用方身份取自 TLS 证书，帧内不带 client ID），Agent 随后先回一帧运行 ID，再回输出块与结束结果；客户端取消即关闭 stream 写方向。Agent 先读取首帧再占用全局 stream 配额；读首帧超时 5 秒，未打开运行流（stream）的连接 10 秒后关闭，最后一次运行结束后的空闲连接约 200 ms 后关闭。配额满时请求排队：stream 槽最多等 50 ms、run 槽最多等 100 ms，超时才返回错误帧。单连接获得的 QUIC stream 信用额度等于 stream 上限，因此 stream 槽排队只在多个连接之间发生。
+4. **输出顺序**：每次运行的所有输出帧走在同一条有序 QUIC stream 上，到达顺序即 Agent 的写出顺序；帧内只有 stdout/stderr 类型和原始字节，因此不需要额外的序号字段。该顺序代表 Agent 收集两个管道时的观察顺序，不承诺进程跨管道的绝对写入时序。
 5. **调度限制**：默认最多 64 个并发运行、128 个并发 stream；serve 参数（`--max-runs`/`--max-streams`）可调整，硬上限分别为 1024 和 4096。建议保持 stream 上限大于 run 上限：等待 run 槽的请求会短暂占用 stream 槽，两者接近时更容易触发 50 ms 排队超时。命令输出实时转发，单块约 32 KiB，不累计缓存；下游慢时依靠管道和 QUIC 流控形成背压。
 6. **鉴权与身份**：使用 `make keygen`（即 `scripts/build.fish keygen`）生成客户端密钥，默认保存到 `keys/client.key`（权限 `0600`，由 `.gitignore` 排除），同时将公钥记录在 `keys/client-key-info`。`make build` 生成 macOS arm64 与 Linux amd64 两个最小化构建，并将该公钥编入二进制；构建前会用 `remote-shell pubkey` 校验私钥与记录的公钥一致，不一致直接失败。客户端私钥可通过 `identity.LoadClientPrivateKey` 读取。Agent 的服务端身份自动生成并稳定保存，但客户端不验证它。
 7. **清理**：每条命令放入独立进程组。取消或超时后先 TERM，等待最多 10 秒，再 KILL。shell 自身退出（含非零退出）后，若组内仍有后代，立即 TERM，最多等 5 秒输出排空后 KILL，避免正常结束的运行被后台进程拖住 10 秒；超时仍未排空则关闭 agent 自身读端，保证运行不会永久卡住。Agent 退出时关闭连接并等待受管运行清理。无外部 supervisor；Agent 被 SIGKILL 或后代脱离进程组造成的残留已接受。
@@ -71,7 +71,7 @@ Agent 为命令创建受管进程组/等效运行边界。取消、超时、断�
 支持的协议版本限定为 `2026-07-28` 与 `2025-11-25`（`ServerOptions.SupportedProtocolVersions`），更旧的版本一律拒绝，避免在未验证的语义下运行。
 HTTP 传输采用 stateless 模式：无需 initialize 握手、不下发 Mcp-Session-Id，因此 curl 或一次性脚本可直接调用，也能使用当前协议版本（2026-07-28，需带 Mcp-Method/Mcp-Name 及 _meta 路由信息）；旧版本（2025-11-25 及更早）同样可用。
 （`--listen` 与 `--auth-token` 只对 HTTP 有意义：未显式指定 `--transport` 时它们隐含选择 HTTP，显式写 `--transport stdio` 又带这两个参数会直接报错。）
-Agent 日志：每个入站请求分配单调递增的 req ID，请求开始时记 `event=start`（kind=shell|shells、run、shell、cwd、timeout、client、remote），结束时记 `event=done`（state=succeeded|failed|cancelled|timed_out、duration、exit、stdout/stderr 字节数）；日志读取方按 req ID 配对两条记录。
+Agent 日志：一次运行的两行以 run ID 打头，`run=<id> event=start …` 与 `run=<id> event=done …`（state=succeeded|failed|cancelled|timed_out、duration、exit、stdout/stderr 字节数），按 run ID 直接配对；瞬时请求（shell 列表）只记一行 `event=done kind=shells state=… duration=… remote=…`。不再有额外的请求序号，也不记录客户端 ID。
 
 ## 已知限制与后续工作
 

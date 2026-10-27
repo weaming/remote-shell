@@ -27,7 +27,6 @@ func TestFrameRoundTrip(t *testing.T) {
 func TestOutputFrameRoundTrip(t *testing.T) {
 	want := execution.Output{
 		RunID:  "a2ddddf2f663",
-		Seq:    42,
 		Stream: execution.StreamStderr,
 		Data:   []byte{0, 1, 2, 255},
 	}
@@ -39,7 +38,7 @@ func TestOutputFrameRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Seq != want.Seq || got.Stream != want.Stream || !bytes.Equal(got.Data, want.Data) {
+	if got.Stream != want.Stream || !bytes.Equal(got.Data, want.Data) {
 		t.Fatalf("decoded output = %#v, want %#v", got, want)
 	}
 }
