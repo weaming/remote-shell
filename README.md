@@ -24,6 +24,8 @@ make build     # 构建 dist/remote-shell-{darwin-arm64,linux-amd64}，公钥编
 ./dist/remote-shell-darwin-arm64 mcp                     # stdio；加 --listen 127.0.0.1:8765 即切到 HTTP（/mcp）
 ```
 
+容器里跑：bridge 网络不转发多播，mDNS 发现不到局域网，用 `--node host.docker.internal:42424` 或让容器共享 host 网络；按架构选 `dist/remote-shell-linux-arm64`（Apple Silicon 容器）或 `linux-amd64`。
+
 Agent 首次启动会在状态目录（macOS `~/Library/Application Support/remote-shell/`）生成并复用 `identity.key`；`node-…` 是它的公钥指纹。
 
 ## MCP 工具

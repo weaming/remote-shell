@@ -18,7 +18,7 @@ set -gx OUT_DIR $OUT_DIR
 
 set -g client_key "$KEY_DIR/client.key"
 set -g client_key_info "$KEY_DIR/client-key-info"
-set -l targets darwin/arm64 linux/amd64
+set -l targets darwin/arm64 linux/amd64 linux/arm64
 
 function usage
     echo "Usage: scripts/build.fish <keygen|build|pubkey>"
