@@ -35,6 +35,8 @@ type run struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	buf      *outputBuffer
+	// retain is how long this run stays queryable after it finishes.
+	retain time.Duration
 	// ready is closed once the agent assigned the run ID and the run is
 	// registered, so a caller can report the ID immediately.
 	ready   chan struct{}
@@ -50,12 +52,20 @@ type run struct {
 	exitCode   int
 	errText    string
 	finishedAt time.Time
+	expiresAt  time.Time
 	finished   bool
 	readyOnce  sync.Once
 }
 
-func newRun(ctx context.Context, cancel context.CancelFunc, selector string, target dialTarget, command execution.Command, maxOutputBytes int64) *run {
+func newRun(ctx context.Context, cancel context.CancelFunc, selector string, target dialTarget, command execution.Command, background bool, config Config) *run {
+	// A run the caller waited on is read once; a background run is polled later,
+	// so it is kept longer.
+	retain := config.ForegroundRetention
+	if background {
+		retain = config.BackgroundRetention
+	}
 	return &run{
+		retain:   retain,
 		selector: selector,
 		nodeID:   target.nodeID,
 		addrs:    append([]string(nil), target.addresses...),
@@ -64,7 +74,7 @@ func newRun(ctx context.Context, cancel context.CancelFunc, selector string, tar
 		cwd:      command.CWD,
 		ctx:      ctx,
 		cancel:   cancel,
-		buf:      newOutputBuffer(maxOutputBytes),
+		buf:      newOutputBuffer(config.MaxOutputBytes),
 		ready:    make(chan struct{}),
 		done:     make(chan struct{}),
 		started:  time.Now(),
@@ -111,6 +121,7 @@ func (r *run) fail(err error) {
 	r.errText = err.Error()
 	r.finished = true
 	r.finishedAt = time.Now()
+	r.expiresAt = r.finishedAt.Add(r.retain)
 	r.mu.Unlock()
 	r.markReady()
 }
@@ -121,6 +132,7 @@ func (r *run) complete(result execution.Result, runErr error) {
 	defer r.mu.Unlock()
 	r.finished = true
 	r.finishedAt = time.Now()
+	r.expiresAt = r.finishedAt.Add(r.retain)
 	switch {
 	case runErr != nil:
 		if r.ctx.Err() != nil {
@@ -205,15 +217,14 @@ func (s snapshot) duration() time.Duration {
 // registry holds recent runs, keyed by the agent-assigned run ID. Finished runs
 // expire so a long-lived bridge cannot grow without bound.
 type registry struct {
-	mu     sync.Mutex
-	runs   map[string]*run
-	order  []string
-	max    int
-	retain time.Duration
+	mu    sync.Mutex
+	runs  map[string]*run
+	order []string
+	max   int
 }
 
-func newRegistry(max int, retain time.Duration) *registry {
-	return &registry{runs: make(map[string]*run, max), max: max, retain: retain}
+func newRegistry(max int) *registry {
+	return &registry{runs: make(map[string]*run, max), max: max}
 }
 
 func (r *registry) add(current *run) {
@@ -261,7 +272,7 @@ func (r *registry) prune() {
 		if !ok {
 			continue
 		}
-		if current.isExpired(now, r.retain) {
+		if current.isExpired(now) {
 			delete(r.runs, id)
 			continue
 		}
@@ -291,10 +302,10 @@ func (r *run) isFinished() bool {
 	return r.finished
 }
 
-func (r *run) isExpired(now time.Time, retain time.Duration) bool {
+func (r *run) isExpired(now time.Time) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.finished && retain > 0 && now.Sub(r.finishedAt) > retain
+	return r.finished && !r.expiresAt.IsZero() && now.After(r.expiresAt)
 }
 
 // logValue renders one field of the key=value line, quoting it when it would

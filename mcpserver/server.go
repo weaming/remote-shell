@@ -32,10 +32,13 @@ import (
 const (
 	// DefaultMaxOutputBytes bounds retained output per run.
 	DefaultMaxOutputBytes = 8 << 20
-	// DefaultRunRetention is how long a finished run stays queryable.
-	DefaultRunRetention = 30 * time.Minute
-	// DefaultRetainedRuns caps how many runs the registry keeps.
-	DefaultRetainedRuns = 64
+	// DefaultForegroundRetention keeps a finished foreground run queryable.
+	DefaultForegroundRetention = time.Minute
+	// DefaultBackgroundRetention does the same for a background run, which its
+	// caller polled for rather than waited on.
+	DefaultBackgroundRetention = 10 * time.Minute
+	// DefaultRetainedRuns caps how many runs the registry keeps at once.
+	DefaultRetainedRuns = 100
 	// DefaultDiscoveryWait is the mDNS lookup budget for one call.
 	DefaultDiscoveryWait = 1500 * time.Millisecond
 	// MaxDiscoveryWait caps the caller-supplied discovery budget.
@@ -81,9 +84,12 @@ type Config struct {
 	ClientKey      ed25519.PrivateKey
 	DefaultNode    string
 	MaxOutputBytes int64
-	RunRetention   time.Duration
-	RetainedRuns   int
-	DiscoveryWait  time.Duration
+	// ForegroundRetention and BackgroundRetention say how long a finished run
+	// stays answerable; zero selects the defaults.
+	ForegroundRetention time.Duration
+	BackgroundRetention time.Duration
+	RetainedRuns        int
+	DiscoveryWait       time.Duration
 }
 
 // Server serves the MCP tools for one client key.
@@ -108,10 +114,13 @@ func New(config Config) (*Server, error) {
 	if config.MaxOutputBytes == 0 {
 		config.MaxOutputBytes = DefaultMaxOutputBytes
 	}
-	if config.RunRetention == 0 {
-		config.RunRetention = DefaultRunRetention
+	if config.ForegroundRetention <= 0 {
+		config.ForegroundRetention = DefaultForegroundRetention
 	}
-	if config.RetainedRuns == 0 {
+	if config.BackgroundRetention <= 0 {
+		config.BackgroundRetention = DefaultBackgroundRetention
+	}
+	if config.RetainedRuns <= 0 {
 		config.RetainedRuns = DefaultRetainedRuns
 	}
 	if config.DiscoveryWait <= 0 {
@@ -119,7 +128,7 @@ func New(config Config) (*Server, error) {
 	}
 	return &Server{
 		config:    config,
-		runs:      newRegistry(config.RetainedRuns, config.RunRetention),
+		runs:      newRegistry(config.RetainedRuns),
 		discovery: newNodeCache(),
 	}, nil
 }
@@ -437,7 +446,7 @@ func (s *Server) runShell(ctx context.Context, _ *mcp.CallToolRequest, input she
 			return
 		}
 	}()
-	record := newRun(runCtx, cancel, input.Node, target, command, s.config.MaxOutputBytes)
+	record := newRun(runCtx, cancel, input.Node, target, command, input.Background, s.config)
 	s.startRun(runCtx, record, command)
 	select {
 	case <-record.ready:

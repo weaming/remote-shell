@@ -33,7 +33,7 @@ Agent 首次启动会在状态目录（macOS `~/Library/Application Support/remo
 | `shell` | 跑一条命令；返回 Agent 分配的 run ID（96 bit 随机）与 Agent 名称 |
 | `shell_status` / `shell_output` | 按 run ID 查状态、按 `all`/`stdout`/`stderr` 分页读输出 |
 | `shell_cancel` | 按 run ID 取消（TERM → 10s → KILL） |
-| `list_runs` | 桥接记得的运行 |
+| `list_runs` | 桥接记得的运行（前台结果留 1 分钟、后台 10 分钟，最多 100 条） |
 | `list_shells` / `discover_nodes` | 目标机可用 shell / 局域网 Agent |
 
 `node` 可填 `host:port`、`--name`、主机名或 node ID；同机时优先走 `127.0.0.1`。`cwd` 支持 `~/子路径`，由 Agent 按其自身用户展开。

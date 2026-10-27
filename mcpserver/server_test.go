@@ -18,6 +18,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"remote-shell/agent"
+	"remote-shell/execution"
 	"remote-shell/identity"
 )
 
@@ -389,6 +390,44 @@ func TestRunCommandUsesTheOnlyDiscoveredAgent(t *testing.T) {
 	bridge.discovery.mu.Unlock()
 	if remembered != address {
 		t.Fatalf("remembered address = %q, want %q", remembered, address)
+	}
+}
+
+// A foreground run is dropped after a minute, a background run after ten, and
+// the registry never keeps more than a hundred.
+func TestRunRetentionFollowsTheRunKind(t *testing.T) {
+	bridge, err := New(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := execution.Command{Shell: execution.ShellBash, Script: "true", CWD: t.TempDir()}
+	foreground := newRun(context.Background(), func() {}, "", dialTarget{}, command, false, bridge.config)
+	background := newRun(context.Background(), func() {}, "", dialTarget{}, command, true, bridge.config)
+	if foreground.retain != DefaultForegroundRetention {
+		t.Fatalf("foreground retain = %s, want %s", foreground.retain, DefaultForegroundRetention)
+	}
+	if background.retain != DefaultBackgroundRetention {
+		t.Fatalf("background retain = %s, want %s", background.retain, DefaultBackgroundRetention)
+	}
+	if DefaultRetainedRuns != 100 {
+		t.Fatalf("retained runs = %d, want 100", DefaultRetainedRuns)
+	}
+
+	// An expired finished run is dropped on the next prune, a fresh one is not.
+	finished := time.Now()
+	foreground.complete(execution.Result{RunID: "run-old"}, nil)
+	foreground.mu.Lock()
+	foreground.finishedAt = finished.Add(-2 * time.Minute)
+	foreground.expiresAt = foreground.finishedAt.Add(foreground.retain)
+	foreground.mu.Unlock()
+	bridge.runs.add(foreground)
+	background.complete(execution.Result{RunID: "run-new"}, nil)
+	bridge.runs.add(background)
+	if _, ok := bridge.runs.get("run-old"); ok {
+		t.Fatal("an expired run survived the prune")
+	}
+	if _, ok := bridge.runs.get("run-new"); !ok {
+		t.Fatal("a fresh run was pruned")
 	}
 }
 
