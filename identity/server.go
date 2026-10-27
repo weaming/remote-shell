@@ -13,12 +13,15 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"remote-shell/protocol"
 )
 
-const keyFileName = "identity.key"
+// identityFileName holds the agent's Ed25519 seed as hex, so the file is
+// readable and diffable; the public half is derived on load.
+const identityFileName = "identity.hex"
 
 type ServerIdentity struct {
 	ID          string
@@ -35,7 +38,7 @@ func LoadOrCreateServer(stateDir string) (ServerIdentity, error) {
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return ServerIdentity{}, fmt.Errorf("create state directory: %w", err)
 	}
-	keyPath := filepath.Join(stateDir, keyFileName)
+	keyPath := filepath.Join(stateDir, identityFileName)
 	privateKey, err := loadPrivateKey(keyPath)
 	if errors.Is(err, os.ErrNotExist) {
 		privateKey, err = createPrivateKey(keyPath)
@@ -99,25 +102,24 @@ func ServerTLSConfig(server ServerIdentity, trustedClient ed25519.PublicKey) (*t
 	return config, nil
 }
 
+// loadPrivateKey reads the 32-byte seed stored as hex and derives the key pair.
 func loadPrivateKey(path string) (ed25519.PrivateKey, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	if len(data) != ed25519.PrivateKeySize {
-		return nil, fmt.Errorf("invalid identity key length in %s", path)
+	seed, err := hex.DecodeString(strings.TrimSpace(string(data)))
+	if err != nil || len(seed) != ed25519.SeedSize {
+		return nil, fmt.Errorf("%s must hold a %d-character hex seed", path, ed25519.SeedSize*2)
 	}
 	info, err := os.Stat(path)
 	if err != nil {
-		return nil, fmt.Errorf("inspect identity key: %w", err)
+		return nil, fmt.Errorf("inspect identity file: %w", err)
 	}
 	if info.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("identity key %s must not be accessible by group or others", path)
+		return nil, fmt.Errorf("identity %s must not be accessible by group or others", path)
 	}
-	if err := validateKeyPair(ed25519.PrivateKey(data)); err != nil {
-		return nil, fmt.Errorf("identity key %s: %w", path, err)
-	}
-	return ed25519.PrivateKey(data), nil
+	return ed25519.NewKeyFromSeed(seed), nil
 }
 
 func createPrivateKey(path string) (ed25519.PrivateKey, error) {
@@ -130,20 +132,20 @@ func createPrivateKey(path string) (ed25519.PrivateKey, error) {
 		return loadPrivateKey(path)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("create identity key: %w", err)
+		return nil, fmt.Errorf("create identity file: %w", err)
 	}
-	if _, err := file.Write(privateKey); err != nil {
+	if _, err := fmt.Fprintf(file, "%s\n", hex.EncodeToString(privateKey.Seed())); err != nil {
 		_ = file.Close()
 		_ = os.Remove(path)
-		return nil, fmt.Errorf("write identity key: %w", err)
+		return nil, fmt.Errorf("write identity seed: %w", err)
 	}
 	if err := file.Sync(); err != nil {
 		_ = file.Close()
 		_ = os.Remove(path)
-		return nil, fmt.Errorf("sync identity key: %w", err)
+		return nil, fmt.Errorf("sync identity seed: %w", err)
 	}
 	if err := file.Close(); err != nil {
-		return nil, fmt.Errorf("close identity key: %w", err)
+		return nil, fmt.Errorf("close identity seed: %w", err)
 	}
 	return privateKey, nil
 }

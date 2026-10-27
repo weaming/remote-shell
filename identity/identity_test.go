@@ -2,8 +2,10 @@ package identity
 
 import (
 	"crypto/ed25519"
+	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -23,12 +25,24 @@ func TestServerIdentityIsStableAcrossRestart(t *testing.T) {
 	if first.ID != NodeID(first.PrivateKey.Public().(ed25519.PublicKey)) {
 		t.Fatalf("server ID does not match key fingerprint: %q", first.ID)
 	}
-	info, err := os.Stat(filepath.Join(stateDir, keyFileName))
+	info, err := os.Stat(filepath.Join(stateDir, identityFileName))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if info.Mode().Perm()&0o077 != 0 {
-		t.Fatalf("identity key permissions are too broad: %o", info.Mode().Perm())
+		t.Fatalf("identity file permissions are too broad: %o", info.Mode().Perm())
+	}
+	// The seed is stored as text, so a human can read and diff it.
+	raw, err := os.ReadFile(filepath.Join(stateDir, identityFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed, err := hex.DecodeString(strings.TrimSpace(string(raw)))
+	if err != nil || len(seed) != ed25519.SeedSize {
+		t.Fatalf("identity file is not a hex seed: %q", string(raw))
+	}
+	if !ed25519.NewKeyFromSeed(seed).Equal(first.PrivateKey) {
+		t.Fatal("stored seed does not reproduce the identity key")
 	}
 }
 

@@ -323,13 +323,13 @@ func TestStateDirectoryIsNamedByAgent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	keyPath := filepath.Join(base, "box-a", "identity.key")
+	keyPath := filepath.Join(base, "box-a", "identity.hex")
 	info, err := os.Stat(keyPath)
 	if err != nil {
-		t.Fatalf("state key %s: %v", keyPath, err)
+		t.Fatalf("state file %s: %v", keyPath, err)
 	}
 	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("key permissions = %o, want 600", info.Mode().Perm())
+		t.Fatalf("file permissions = %o, want 600", info.Mode().Perm())
 	}
 	second, err := New(Config{Name: "box-b", StateBaseDir: base, AllowUnauthenticated: true, DisableDiscovery: true})
 	if err != nil {

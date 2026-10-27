@@ -28,7 +28,7 @@ make build     # 构建 dist/remote-shell-{darwin-arm64,linux-amd64}，公钥编
 
 反过来也成立——`serve` 跑在容器里、宿主机 `mcp` 连过去：发布 UDP 端口（`-p 42425:42424/udp`）后用 `--node 127.0.0.1:42425`，容器镜像需自带 bash/fish/zsh，并把 `~/.config/remote-shell` 挂成卷以保住 node ID。
 
-`--name` 必填：它既是广播的名字，也是状态目录名——身份保存在 `~/.config/remote-shell/<name>/identity.key`（0600），首次启动生成、之后复用，`node-…` 就是这把公钥的指纹。
+`--name` 必填：它既是广播的名字，也是状态目录名——身份保存在 `~/.config/remote-shell/<name>/identity.hex`：一行 64 个十六进制字符的 **Ed25519 私钥种子**（0600），公钥与证书每次启动派生；`node-…` 就是衍生公钥的指纹。
 
 ## MCP 工具
 
