@@ -99,7 +99,9 @@ func (c *Client) ListShells(ctx context.Context) ([]execution.Shell, error) {
 // Run is one shell run in flight on the agent. Output is drained by a
 // goroutine started by StartShell, so a slow caller cannot stall the agent.
 type Run struct {
-	ID     string
+	ID string
+	// Name is the human-readable label the agent reports for itself.
+	Name   string
 	stream *quic.Stream
 	done   chan runOutcome
 }
@@ -141,7 +143,7 @@ func (c *Client) StartShell(ctx context.Context, command execution.Command, emit
 			stream.CancelRead(0)
 			return nil, err
 		}
-		run := &Run{ID: started.RunID, stream: stream, done: make(chan runOutcome, 1)}
+		run := &Run{ID: started.RunID, Name: started.Name, stream: stream, done: make(chan runOutcome, 1)}
 		go run.drain(ctx, emit)
 		return run, nil
 	case protocol.FrameError:

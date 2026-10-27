@@ -455,7 +455,7 @@ func (a *Agent) handleStream(connectionCtx context.Context, connection *quic.Con
 
 	// Announce the run ID before any output, so the client can query or cancel
 	// this run while it is still going.
-	startedFrame, err := protocol.MarshalFrame(protocol.FrameShellStarted, protocol.ShellStarted{RunID: runID})
+	startedFrame, err := protocol.MarshalFrame(protocol.FrameShellStarted, protocol.ShellStarted{RunID: runID, Name: a.name})
 	if err == nil {
 		err = protocol.WriteFrame(stream, startedFrame)
 	}

@@ -3,6 +3,8 @@ package mcpserver
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,6 +43,7 @@ type run struct {
 
 	mu         sync.Mutex
 	id         string
+	name       string
 	node       string
 	handle     *client.Run
 	state      runState
@@ -75,6 +78,7 @@ func (r *run) setHandle(handle *client.Run, node string) {
 	defer r.mu.Unlock()
 	r.handle = handle
 	r.id = handle.ID
+	r.name = handle.Name
 	r.node = node
 }
 
@@ -149,6 +153,7 @@ func (r *run) complete(result execution.Result, runErr error) {
 
 type snapshot struct {
 	ID           string
+	Name         string
 	Node         string
 	Shell        execution.Shell
 	Script       string
@@ -173,6 +178,7 @@ func (r *run) snapshot() snapshot {
 	}
 	return snapshot{
 		ID:           r.id,
+		Name:         r.name,
 		Node:         node,
 		Shell:        r.shell,
 		Script:       r.script,
@@ -291,12 +297,26 @@ func (r *run) isExpired(now time.Time, retain time.Duration) bool {
 	return r.finished && retain > 0 && now.Sub(r.finishedAt) > retain
 }
 
+// logValue renders one field of the key=value line, quoting it when it would
+// otherwise break the space-separated format.
+func logValue(value string) string {
+	if value == "" || strings.ContainsAny(value, " \"") {
+		return strconv.Quote(value)
+	}
+	return value
+}
+
 // describeRun renders a run for a prompt line.
 func describeRun(snap snapshot) string {
 	id := snap.ID
 	if id == "" {
 		return "(not started)"
 	}
-	return fmt.Sprintf("run=%s state=%s exit_code=%d duration=%s shell=%s cwd=%s node=%s",
-		id, snap.State, snap.ExitCode, snap.duration().Round(time.Millisecond), snap.Shell, snap.CWD, snap.Node)
+	label := fmt.Sprintf("run=%s", id)
+	if snap.Name != "" {
+		label += " name=" + logValue(snap.Name)
+	}
+	return fmt.Sprintf("%s state=%s exit_code=%d duration=%s shell=%s cwd=%s node=%s",
+		label, snap.State, snap.ExitCode, snap.duration().Round(time.Millisecond),
+		logValue(string(snap.Shell)), logValue(snap.CWD), snap.Node)
 }

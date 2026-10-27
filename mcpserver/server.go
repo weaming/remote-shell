@@ -380,6 +380,7 @@ type shellInput struct {
 
 type shellRunOutput struct {
 	RunID        string `json:"run_id"`
+	Name         string `json:"name,omitempty"`
 	Node         string `json:"node"`
 	State        string `json:"state"`
 	ExitCode     int    `json:"exit_code"`
@@ -450,7 +451,7 @@ func (s *Server) runShell(ctx context.Context, _ *mcp.CallToolRequest, input she
 		text := fmt.Sprintf("started %s on %s in the background; poll with shell_status and shell_output",
 			record.ID(), target.describe())
 		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}},
-			shellRunOutput{RunID: record.ID(), Node: target.describe(), State: string(stateRunning), Background: true}, nil
+			shellRunOutput{RunID: record.ID(), Name: record.snapshot().Name, Node: target.describe(), State: string(stateRunning), Background: true}, nil
 	}
 	select {
 	case <-record.done:
@@ -514,6 +515,7 @@ func (s *Server) renderRun(record *run) (*mcp.CallToolResult, shellRunOutput, er
 	}
 	return result, shellRunOutput{
 		RunID:        snap.ID,
+		Name:         snap.Name,
 		Node:         snap.Node,
 		State:        string(snap.State),
 		ExitCode:     snap.ExitCode,
@@ -531,6 +533,7 @@ type runIDInput struct {
 
 type shellStatusOutput struct {
 	RunID        string `json:"run_id"`
+	Name         string `json:"name,omitempty"`
 	Node         string `json:"node"`
 	Shell        string `json:"shell"`
 	Script       string `json:"script"`
@@ -548,6 +551,7 @@ type shellStatusOutput struct {
 func statusOf(snap snapshot) shellStatusOutput {
 	return shellStatusOutput{
 		RunID:        snap.ID,
+		Name:         snap.Name,
 		Node:         snap.Node,
 		Shell:        string(snap.Shell),
 		Script:       snap.Script,
@@ -569,8 +573,12 @@ func (s *Server) shellStatus(_ context.Context, _ *mcp.CallToolRequest, input ru
 		return nil, shellStatusOutput{}, fmt.Errorf("unknown run %q", input.RunID)
 	}
 	snap := record.snapshot()
-	text := fmt.Sprintf("%s state=%s exit_code=%d done=%t elapsed=%s stdout=%d stderr=%d trimmed=%d",
-		snap.ID, snap.State, snap.ExitCode, snap.Done, snap.duration().Round(time.Millisecond),
+	text := fmt.Sprintf("%s", snap.ID)
+	if snap.Name != "" {
+		text += " name=" + logValue(snap.Name)
+	}
+	text += fmt.Sprintf(" state=%s exit_code=%d done=%t elapsed=%s stdout=%d stderr=%d trimmed=%d",
+		snap.State, snap.ExitCode, snap.Done, snap.duration().Round(time.Millisecond),
 		snap.StdoutBytes, snap.StderrBytes, snap.TrimmedBytes)
 	if snap.ErrText != "" {
 		text += " error=" + snap.ErrText

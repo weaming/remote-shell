@@ -40,9 +40,12 @@ type Frame struct {
 // A shell request frame carries a CommandSpec. The agent identifies the caller
 // from the certificate it just verified, so no client ID travels in the frame.
 
-// ShellStarted is the first frame the agent sends for an accepted run.
+// ShellStarted is the first frame the agent sends for an accepted run. It names
+// the agent too, so a caller that dialed a bare address can still report which
+// machine ran the command.
 type ShellStarted struct {
 	RunID string `json:"run_id"`
+	Name  string `json:"name,omitempty"`
 }
 
 type CommandSpec struct {

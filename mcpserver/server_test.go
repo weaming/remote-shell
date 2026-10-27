@@ -377,6 +377,9 @@ func TestRunCommandUsesTheOnlyDiscoveredAgent(t *testing.T) {
 	if got := resultText(result); !strings.Contains(got, "auto") {
 		t.Fatalf("output = %q, want the command output", got)
 	}
+	if got := resultText(result); !strings.Contains(got, " name=test-agent ") {
+		t.Fatalf("output = %q, want the agent name after the run ID", got)
+	}
 	bridge.discovery.mu.Lock()
 	remembered := bridge.discovery.lastGood["node-only"]
 	bridge.discovery.mu.Unlock()
@@ -575,6 +578,7 @@ func startAgent(t *testing.T) (string, ed25519.PrivateKey) {
 	port := packetConn.LocalAddr().(*net.UDPAddr).Port
 	packetConn.Close()
 	instance, err := agent.New(agent.Config{
+		Name:             "test-agent",
 		ListenAddress:    fmt.Sprintf("127.0.0.1:%d", port),
 		StateDir:         t.TempDir(),
 		TrustedClientKey: publicKey,

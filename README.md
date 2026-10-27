@@ -30,7 +30,7 @@ Agent 首次启动会在状态目录（macOS `~/Library/Application Support/remo
 
 | 工具 | 说明 |
 |---|---|
-| `shell` | 跑一条命令；返回 Agent 分配的 run ID（96 bit 随机） |
+| `shell` | 跑一条命令；返回 Agent 分配的 run ID（96 bit 随机）与 Agent 名称 |
 | `shell_status` / `shell_output` | 按 run ID 查状态、按 `all`/`stdout`/`stderr` 分页读输出 |
 | `shell_cancel` | 按 run ID 取消（TERM → 10s → KILL） |
 | `list_runs` | 桥接记得的运行 |
