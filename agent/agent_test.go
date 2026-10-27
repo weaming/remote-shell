@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"log"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,17 +65,13 @@ func TestAgentStreamsAuthenticatedTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request, err := protocol.MarshalFrame(protocol.FrameTaskRequest, protocol.TaskRequest{
+	request, err := protocol.MarshalFrame(protocol.FrameShellRequest, protocol.ShellRequest{
 		ClientID: identity.ClientID(publicKey),
-		Task: protocol.TaskSpec{
-			ID: "integration-task",
-			Commands: []protocol.CommandSpec{{
-				ID:        "integration-command",
-				Shell:     execution.ShellBash,
-				Script:    "printf hello; printf problem >&2",
-				CWD:       t.TempDir(),
-				TimeoutMS: 5000,
-			}},
+		Command: protocol.CommandSpec{
+			Shell:     execution.ShellBash,
+			Script:    "printf hello; printf problem >&2",
+			CWD:       t.TempDir(),
+			TimeoutMS: 5000,
 		},
 	})
 	if err != nil {
@@ -91,9 +89,11 @@ responseLoop:
 	for {
 		frame, readErr := protocol.ReadFrame(stream)
 		if readErr != nil {
-			t.Fatalf("read task response: %v", readErr)
+			t.Fatalf("read run response: %v", readErr)
 		}
 		switch frame.Type {
+		case protocol.FrameShellStarted:
+			continue
 		case protocol.FrameOutput:
 			chunk, decodeErr := protocol.DecodeOutput(frame.Payload)
 			if decodeErr != nil {
@@ -108,13 +108,13 @@ responseLoop:
 			} else {
 				stderr += string(chunk.Data)
 			}
-		case protocol.FrameTaskResult:
-			var result execution.TaskResult
+		case protocol.FrameShellResult:
+			var result execution.Result
 			if err := protocol.UnmarshalPayload(frame, &result); err != nil {
 				t.Fatal(err)
 			}
-			if result.TaskID != "integration-task" || len(result.Commands) != 1 || result.Commands[0].ExitCode != 0 {
-				t.Fatalf("unexpected task result: %+v", result)
+			if result.RunID == "" || result.ExitCode != 0 {
+				t.Fatalf("unexpected run result: %+v", result)
 			}
 			if stdout != "hello" || stderr != "problem" {
 				t.Fatalf("stdout=%q stderr=%q", stdout, stderr)
@@ -132,7 +132,7 @@ responseLoop:
 	select {
 	case <-connection.Context().Done():
 	case <-time.After(time.Second):
-		t.Fatal("agent kept an idle connection open after task completion")
+		t.Fatal("agent kept an idle connection open after run completion")
 	}
 
 	listConnection, err := dialAgent(t, fmt.Sprintf("127.0.0.1:%d", port), clientTLS)
@@ -176,11 +176,11 @@ responseLoop:
 		if streamErr != nil {
 			t.Fatal(streamErr)
 		}
-		badRequest, encodeErr := protocol.MarshalFrame(protocol.FrameTaskRequest, protocol.TaskRequest{
+		badRequest, encodeErr := protocol.MarshalFrame(protocol.FrameShellRequest, protocol.ShellRequest{
 			ClientID: identity.ClientID(wrongPublicKey),
-			Task: protocol.TaskSpec{ID: "must-not-run", Commands: []protocol.CommandSpec{{
-				ID: "command-1", Shell: execution.ShellBash, Script: "exit 0", CWD: t.TempDir(),
-			}}},
+			Command: protocol.CommandSpec{
+				Shell: execution.ShellBash, Script: "exit 0", CWD: t.TempDir(),
+			},
 		})
 		if encodeErr != nil {
 			t.Fatal(encodeErr)
@@ -209,11 +209,11 @@ responseLoop:
 	if err != nil {
 		t.Fatal(err)
 	}
-	cancelRequest, err := protocol.MarshalFrame(protocol.FrameTaskRequest, protocol.TaskRequest{
+	cancelRequest, err := protocol.MarshalFrame(protocol.FrameShellRequest, protocol.ShellRequest{
 		ClientID: identity.ClientID(publicKey),
-		Task: protocol.TaskSpec{ID: "cancelled-task", Commands: []protocol.CommandSpec{{
-			ID: "sleep", Shell: execution.ShellBash, Script: "sleep 30", CWD: t.TempDir(), TimeoutMS: 30000,
-		}}},
+		Command: protocol.CommandSpec{
+			Shell: execution.ShellBash, Script: "sleep 30", CWD: t.TempDir(), TimeoutMS: 30000,
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -225,26 +225,29 @@ responseLoop:
 		t.Fatal(err)
 	}
 	time.Sleep(50 * time.Millisecond)
-	if err := protocol.WriteFrame(cancelStream, protocol.Frame{Type: protocol.FrameCancel}); err != nil {
+	if err := cancelStream.Close(); err != nil {
 		t.Fatal(err)
 	}
-	var cancelled execution.TaskResult
+	var cancelled execution.Result
 	for {
 		frame, err := protocol.ReadFrame(cancelStream)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if frame.Type == protocol.FrameTaskResult {
+		if frame.Type == protocol.FrameShellStarted {
+			continue
+		}
+		if frame.Type == protocol.FrameShellResult {
 			if err := protocol.UnmarshalPayload(frame, &cancelled); err != nil {
 				t.Fatal(err)
 			}
 			break
 		}
 		if frame.Type == protocol.FrameError {
-			t.Fatalf("cancel task failed: %s", frame.Payload)
+			t.Fatalf("cancel run failed: %s", frame.Payload)
 		}
 	}
-	if len(cancelled.Commands) != 1 || !cancelled.Commands[0].Cancelled {
+	if !cancelled.Cancelled {
 		t.Fatalf("cancel was not reported: %+v", cancelled)
 	}
 }
@@ -292,10 +295,10 @@ func TestAgentAllowsExplicitUnauthenticatedMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request, err := protocol.MarshalFrame(protocol.FrameTaskRequest, protocol.TaskRequest{
-		Task: protocol.TaskSpec{ID: "unauth-task", Commands: []protocol.CommandSpec{{
-			ID: "command-1", Shell: execution.ShellBash, Script: "exit 0", CWD: t.TempDir(),
-		}}},
+	request, err := protocol.MarshalFrame(protocol.FrameShellRequest, protocol.ShellRequest{
+		Command: protocol.CommandSpec{
+			Shell: execution.ShellBash, Script: "exit 0", CWD: t.TempDir(),
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -306,12 +309,20 @@ func TestAgentAllowsExplicitUnauthenticatedMode(t *testing.T) {
 	if err := stream.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
+	// The agent announces the run first, then reports the result.
+	startedFrame, err := protocol.ReadFrame(stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if startedFrame.Type != protocol.FrameShellStarted {
+		t.Fatalf("frame type = %d, want the run announcement", startedFrame.Type)
+	}
 	frame, err := protocol.ReadFrame(stream)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if frame.Type != protocol.FrameTaskResult {
-		t.Fatalf("frame type = %d, want task result", frame.Type)
+	if frame.Type != protocol.FrameShellResult {
+		t.Fatalf("frame type = %d, want the run result", frame.Type)
 	}
 	_ = connection.CloseWithError(0, "test complete")
 }
@@ -323,8 +334,8 @@ func TestAgentRequiresTrustedClientKey(t *testing.T) {
 	if _, err := New(Config{DisableDiscovery: true, AllowUnauthenticated: true, TrustedClientKey: make([]byte, 32)}); err == nil {
 		t.Fatal("expected conflicting authentication configuration error")
 	}
-	if _, err := New(Config{DisableDiscovery: true, AllowUnauthenticated: true, MaxConcurrentTasks: MaxConfiguredTasks + 1}); err == nil {
-		t.Fatal("expected oversized task concurrency to be rejected")
+	if _, err := New(Config{DisableDiscovery: true, AllowUnauthenticated: true, MaxConcurrentRuns: MaxConfiguredRuns + 1}); err == nil {
+		t.Fatal("expected oversized run concurrency to be rejected")
 	}
 }
 
@@ -429,7 +440,7 @@ func TestAgentResetsStreamWithTruncatedFirstFrame(t *testing.T) {
 	}
 	// A partial frame header makes the stream visible to the agent without ever
 	// completing a request frame.
-	if _, err := stream.Write([]byte{byte(protocol.FrameTaskRequest), 0}); err != nil {
+	if _, err := stream.Write([]byte{byte(protocol.FrameShellRequest), 0}); err != nil {
 		t.Fatal(err)
 	}
 	if err := stream.SetReadDeadline(time.Now().Add(streamHeaderTimeout + 5*time.Second)); err != nil {
@@ -491,7 +502,7 @@ func TestAgentAcceptsQueuedRequestAfterStreamSlotFrees(t *testing.T) {
 	}
 	defer connection.CloseWithError(0, "test complete")
 
-	blocking, err := openTaskStream(t, connection, identity.ClientID(publicKey), "blocking", "sleep 2")
+	blocking, err := openRunStream(t, connection, identity.ClientID(publicKey), "blocking", "sleep 2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -504,11 +515,11 @@ func TestAgentAcceptsQueuedRequestAfterStreamSlotFrees(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request, err := protocol.MarshalFrame(protocol.FrameTaskRequest, protocol.TaskRequest{
+	request, err := protocol.MarshalFrame(protocol.FrameShellRequest, protocol.ShellRequest{
 		ClientID: identity.ClientID(publicKey),
-		Task: protocol.TaskSpec{ID: "overflow", Commands: []protocol.CommandSpec{{
-			ID: "command-1", Shell: execution.ShellBash, Script: "exit 0", CWD: t.TempDir(), TimeoutMS: 5000,
-		}}},
+		Command: protocol.CommandSpec{
+			Shell: execution.ShellBash, Script: "exit 0", CWD: t.TempDir(), TimeoutMS: 5000,
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -519,23 +530,26 @@ func TestAgentAcceptsQueuedRequestAfterStreamSlotFrees(t *testing.T) {
 	if err := overflow.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	var result execution.TaskResult
+	var result execution.Result
 	for {
 		frame, err := protocol.ReadFrame(overflow)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if frame.Type == protocol.FrameTaskResult {
+		if frame.Type == protocol.FrameShellStarted {
+			continue
+		}
+		if frame.Type == protocol.FrameShellResult {
 			if err := protocol.UnmarshalPayload(frame, &result); err != nil {
 				t.Fatal(err)
 			}
 			break
 		}
 		if frame.Type != protocol.FrameOutput {
-			t.Fatalf("frame type = %d, want output or task result", frame.Type)
+			t.Fatalf("frame type = %d, want output or run result", frame.Type)
 		}
 	}
-	if len(result.Commands) != 1 || result.Commands[0].ExitCode != 0 {
+	if result.RunID == "" || result.ExitCode != 0 {
 		t.Fatalf("queued request was not executed: %+v", result)
 	}
 }
@@ -557,7 +571,7 @@ func TestAgentRejectsRequestWhenTaskSlotsStayBusy(t *testing.T) {
 		StateDir:             t.TempDir(),
 		TrustedClientKey:     publicKey,
 		DisableDiscovery:     true,
-		MaxConcurrentTasks:   1,
+		MaxConcurrentRuns:    1,
 		MaxConcurrentStreams: 4,
 	})
 	if err != nil {
@@ -584,14 +598,14 @@ func TestAgentRejectsRequestWhenTaskSlotsStayBusy(t *testing.T) {
 	}
 	defer connection.CloseWithError(0, "test complete")
 
-	blocking, err := openTaskStream(t, connection, identity.ClientID(publicKey), "blocking", "sleep 10")
+	blocking, err := openRunStream(t, connection, identity.ClientID(publicKey), "blocking", "sleep 10")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer blocking.CancelRead(0)
 	time.Sleep(200 * time.Millisecond)
 
-	overflow, err := openTaskStream(t, connection, identity.ClientID(publicKey), "overflow", "exit 0")
+	overflow, err := openRunStream(t, connection, identity.ClientID(publicKey), "overflow", "exit 0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -603,7 +617,7 @@ func TestAgentRejectsRequestWhenTaskSlotsStayBusy(t *testing.T) {
 		t.Fatal(err)
 	}
 	if frame.Type != protocol.FrameError {
-		t.Fatalf("frame type = %d, want an error frame when task slots stay busy", frame.Type)
+		t.Fatalf("frame type = %d, want an error frame when run slots stay busy", frame.Type)
 	}
 }
 
@@ -652,7 +666,7 @@ func TestAgentRejectsStreamFromSecondConnectionWhenSaturated(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer holder.CloseWithError(0, "test complete")
-	busy, err := openTaskStream(t, holder, clientID, "busy", "sleep 10")
+	busy, err := openRunStream(t, holder, clientID, "busy", "sleep 10")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -665,7 +679,7 @@ func TestAgentRejectsStreamFromSecondConnectionWhenSaturated(t *testing.T) {
 	}
 	defer other.CloseWithError(0, "test complete")
 	started := time.Now()
-	rejected, err := openTaskStream(t, other, clientID, "rejected", "exit 0")
+	rejected, err := openRunStream(t, other, clientID, "rejected", "exit 0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -725,7 +739,7 @@ func TestAgentStillShutsDownAfterAbandonedStream(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Abandon the stream without ever completing a request frame.
-	if _, err := stream.Write([]byte{byte(protocol.FrameTaskRequest), 1}); err != nil {
+	if _, err := stream.Write([]byte{byte(protocol.FrameShellRequest), 1}); err != nil {
 		cancel()
 		t.Fatal(err)
 	}
@@ -752,17 +766,17 @@ func TestAgentStillShutsDownAfterAbandonedStream(t *testing.T) {
 	}
 }
 
-func openTaskStream(t *testing.T, connection *quic.Conn, clientID, taskID, script string) (*quic.Stream, error) {
+func openRunStream(t *testing.T, connection *quic.Conn, clientID, runID, script string) (*quic.Stream, error) {
 	t.Helper()
 	stream, err := connection.OpenStreamSync(context.Background())
 	if err != nil {
 		return nil, err
 	}
-	request, err := protocol.MarshalFrame(protocol.FrameTaskRequest, protocol.TaskRequest{
+	request, err := protocol.MarshalFrame(protocol.FrameShellRequest, protocol.ShellRequest{
 		ClientID: clientID,
-		Task: protocol.TaskSpec{ID: taskID, Commands: []protocol.CommandSpec{{
-			ID: "command-1", Shell: execution.ShellBash, Script: script, CWD: t.TempDir(), TimeoutMS: 5000,
-		}}},
+		Command: protocol.CommandSpec{
+			Shell: execution.ShellBash, Script: script, CWD: t.TempDir(), TimeoutMS: 5000,
+		},
 	})
 	if err != nil {
 		return nil, err
@@ -796,4 +810,163 @@ func dialAgent(t *testing.T, address string, tlsConfig *tls.Config) (*quic.Conn,
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return quic.DialAddr(ctx, address, tlsConfig, &quic.Config{HandshakeIdleTimeout: 2 * time.Second})
+}
+
+// The start line and the result line of one request must share a request ID so
+// a log reader can match them.
+func TestAgentLogsRequestStartAndResultWithSharedID(t *testing.T) {
+	if !containsShell(execution.AvailableShells(), execution.ShellBash) {
+		t.Skip("bash is not installed")
+	}
+	publicKey, privateKey, err := identity.GenerateClientKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := freeUDPPort()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(Config{
+		ListenAddress:    fmt.Sprintf("127.0.0.1:%d", port),
+		StateDir:         t.TempDir(),
+		TrustedClientKey: publicKey,
+		DisableDiscovery: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var captured strings.Builder
+	previous := log.Writer()
+	log.SetOutput(&captured)
+	defer log.SetOutput(previous)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	serveResult := make(chan error, 1)
+	go func() { serveResult <- server.Serve(ctx) }()
+	defer func() {
+		cancel()
+		select {
+		case err := <-serveResult:
+			if err != nil {
+				t.Errorf("agent serve: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("agent did not stop after cancellation")
+		}
+	}()
+
+	clientTLS, err := identity.ClientTLSConfig(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := dialAgent(t, fmt.Sprintf("127.0.0.1:%d", port), clientTLS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.CloseWithError(0, "test complete")
+
+	// One successful run, one failing run, and one shell-list request.
+	runTask := func(id, script string) {
+		stream, err := connection.OpenStreamSync(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer stream.Close()
+		frame, err := protocol.MarshalFrame(protocol.FrameShellRequest, protocol.ShellRequest{
+			ClientID: identity.ClientID(publicKey),
+			Command: protocol.CommandSpec{
+				Shell:  execution.ShellBash,
+				Script: script,
+				CWD:    t.TempDir(),
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := protocol.WriteFrame(stream, frame); err != nil {
+			t.Fatal(err)
+		}
+		_ = stream.SetReadDeadline(time.Now().Add(5 * time.Second))
+		for {
+			frame, err := protocol.ReadFrame(stream)
+			if err != nil {
+				t.Fatalf("read run response: %v", err)
+			}
+			if frame.Type == protocol.FrameShellResult {
+				return
+			}
+			if frame.Type == protocol.FrameShellStarted {
+				continue
+			}
+		}
+	}
+	runTask("logged-ok", "printf hello")
+	runTask("logged-fail", "printf boom >&2; exit 4")
+
+	stream, err := connection.OpenStreamSync(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	shellRequest, err := protocol.MarshalFrame(protocol.FrameListShells, struct{}{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := protocol.WriteFrame(stream, shellRequest); err != nil {
+		t.Fatal(err)
+	}
+	_ = stream.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := protocol.ReadFrame(stream); err != nil {
+		t.Fatalf("read shell list: %v", err)
+	}
+	stream.Close()
+
+	starts, dones := parseRequestLogs(captured.String())
+	if len(starts) != 3 || len(dones) != 3 {
+		t.Fatalf("starts=%v dones=%v, want three matched pairs in:\n%s", starts, dones, captured.String())
+	}
+	counts := make(map[string]int, 3)
+	for id, fields := range dones {
+		if _, ok := starts[id]; !ok {
+			t.Fatalf("result req=%s has no start line:\n%s", id, captured.String())
+		}
+		if fields["duration"] == "" {
+			t.Fatalf("result req=%s has no duration:\n%s", id, captured.String())
+		}
+		counts[fields["state"]]++
+		if starts[id]["kind"] == "shell" && !strings.HasPrefix(starts[id]["run"], "sh-") {
+			t.Fatalf("req=%s did not log the agent-assigned run ID: %v", id, starts[id])
+		}
+	}
+	if counts["succeeded"] != 2 || counts["failed"] != 1 {
+		t.Fatalf("states = %v, want two succeeded and one failed:\n%s", counts, captured.String())
+	}
+	if !strings.Contains(captured.String(), "exit=4") {
+		t.Fatalf("failing run did not log its exit code:\n%s", captured.String())
+	}
+}
+
+// parseRequestLogs indexes start and result lines by request ID.
+func parseRequestLogs(output string) (map[string]map[string]string, map[string]map[string]string) {
+	starts := make(map[string]map[string]string)
+	dones := make(map[string]map[string]string)
+	for _, line := range strings.Split(output, "\n") {
+		if !strings.Contains(line, "event=") {
+			continue
+		}
+		fields := make(map[string]string)
+		for _, token := range strings.Fields(line) {
+			key, value, ok := strings.Cut(token, "=")
+			if ok {
+				fields[key] = value
+			}
+		}
+		id := fields["req"]
+		switch fields["event"] {
+		case "start":
+			starts[id] = fields
+		case "done":
+			dones[id] = fields
+		}
+	}
+	return starts, dones
 }

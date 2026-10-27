@@ -9,7 +9,7 @@ import (
 // classifyResult maps how a command ended onto a command result.
 //
 // A shell that already exited has an authoritative exit status, even when the
-// task context was cancelled meanwhile. Otherwise the first observed context
+// run context was cancelled meanwhile. Otherwise the first observed context
 // error decides between cancellation and timeout, so a parent cancellation
 // arriving during the termination grace cannot erase an observed timeout.
 // A non-empty currentErr (for example an output forwarding failure) wins over

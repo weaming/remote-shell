@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"reflect"
 	"testing"
+	"time"
 
 	"remote-shell/execution"
 )
 
 func TestFrameRoundTrip(t *testing.T) {
-	want := Frame{Type: FrameCancel, Payload: []byte("cancel")}
+	want := Frame{Type: FrameShellStarted, Payload: []byte(`{"run_id":"sh-1"}`)}
 	var encoded bytes.Buffer
 	if err := WriteFrame(&encoded, want); err != nil {
 		t.Fatal(err)
@@ -25,10 +26,10 @@ func TestFrameRoundTrip(t *testing.T) {
 
 func TestOutputFrameRoundTrip(t *testing.T) {
 	want := execution.Output{
-		CommandID: "cmd-1",
-		Seq:       42,
-		Stream:    execution.StreamStderr,
-		Data:      []byte{0, 1, 2, 255},
+		RunID:  "sh-1",
+		Seq:    42,
+		Stream: execution.StreamStderr,
+		Data:   []byte{0, 1, 2, 255},
 	}
 	encoded, err := EncodeOutput(want)
 	if err != nil {
@@ -38,37 +39,50 @@ func TestOutputFrameRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Seq != want.Seq || got.CommandID != want.CommandID || got.Stream != want.Stream || !bytes.Equal(got.Data, want.Data) {
+	if got.Seq != want.Seq || got.Stream != want.Stream || !bytes.Equal(got.Data, want.Data) {
 		t.Fatalf("decoded output = %#v, want %#v", got, want)
 	}
 }
 
 func TestReadFrameRejectsOversizedFrame(t *testing.T) {
-	encoded := []byte{byte(FrameTaskRequest), 0, 64, 0, 1}
+	encoded := []byte{byte(FrameShellRequest), 0, 64, 0, 1}
 	if _, err := ReadFrame(bytes.NewReader(encoded)); err == nil {
 		t.Fatal("expected oversized frame rejection")
 	}
 }
 
-func TestTaskSpecTimeoutIsInMilliseconds(t *testing.T) {
-	task, err := (TaskSpec{
-		ID: "task-1",
-		Commands: []CommandSpec{{
-			ID: "command-1", Shell: execution.ShellBash, Script: "true", CWD: t.TempDir(),
-		}},
-	}).ExecutionTask()
+func TestCommandSpecRoundTrip(t *testing.T) {
+	command := execution.Command{
+		Shell:   execution.ShellBash,
+		Script:  "true",
+		CWD:     t.TempDir(),
+		Env:     map[string]string{"A": "b"},
+		Stdin:   []byte("in"),
+		Timeout: 2500 * time.Millisecond,
+	}
+	spec := NewCommandSpec(command)
+	if spec.TimeoutMS != 2500 {
+		t.Fatalf("timeout_ms = %d, want 2500", spec.TimeoutMS)
+	}
+	decoded, err := spec.ExecutionCommand()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := task.Commands[0].Timeout; got != execution.DefaultTimeout {
-		t.Fatalf("timeout = %s, want %s", got, execution.DefaultTimeout)
+	if decoded.Timeout != command.Timeout || decoded.Script != command.Script || decoded.CWD != command.CWD {
+		t.Fatalf("decoded = %+v, want %+v", decoded, command)
 	}
-	_, err = (TaskSpec{
-		ID: "task-2",
-		Commands: []CommandSpec{{
-			ID: "command-1", Shell: execution.ShellBash, Script: "true", CWD: t.TempDir(), TimeoutMS: 3600001,
-		}},
-	}).ExecutionTask()
+	if string(decoded.Stdin) != "in" || decoded.Env["A"] != "b" {
+		t.Fatalf("decoded stdin/env = %q/%v", decoded.Stdin, decoded.Env)
+	}
+
+	// A zero timeout is sent as 0 and resolved by the agent.
+	zero, err := (CommandSpec{}).ExecutionCommand()
+	if err == nil {
+		if zero.Timeout != execution.DefaultTimeout {
+			t.Fatalf("zero timeout = %s, want %s", zero.Timeout, execution.DefaultTimeout)
+		}
+	}
+	_, err = (CommandSpec{TimeoutMS: 3600001}).ExecutionCommand()
 	if err == nil {
 		t.Fatal("expected timeout above one hour to be rejected")
 	}

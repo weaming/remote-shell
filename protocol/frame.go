@@ -20,11 +20,14 @@ const (
 type FrameType byte
 
 const (
-	FrameTaskRequest FrameType = iota + 1
+	// FrameShellRequest opens a run and carries exactly one command.
+	FrameShellRequest FrameType = iota + 1
+	// FrameShellStarted carries the run ID the agent assigned, before any
+	// output, so the client can query the run while it is still going.
+	FrameShellStarted
 	FrameListShells
-	FrameCancel
 	FrameOutput
-	FrameTaskResult
+	FrameShellResult
 	FrameError
 	FrameShellList
 )
@@ -34,19 +37,19 @@ type Frame struct {
 	Payload []byte
 }
 
-type TaskRequest struct {
-	ClientID string   `json:"client_id,omitempty"`
-	Task     TaskSpec `json:"task"`
+// ShellRequest asks the agent to run one command. The run ID is assigned by the
+// agent, not by the caller.
+type ShellRequest struct {
+	ClientID string      `json:"client_id,omitempty"`
+	Command  CommandSpec `json:"command"`
 }
 
-type TaskSpec struct {
-	ID       string         `json:"id"`
-	Mode     execution.Mode `json:"mode,omitempty"`
-	Commands []CommandSpec  `json:"commands"`
+// ShellStarted is the first frame the agent sends for an accepted run.
+type ShellStarted struct {
+	RunID string `json:"run_id"`
 }
 
 type CommandSpec struct {
-	ID        string            `json:"id"`
 	Shell     execution.Shell   `json:"shell"`
 	Script    string            `json:"script"`
 	CWD       string            `json:"cwd"`
@@ -55,45 +58,37 @@ type CommandSpec struct {
 	TimeoutMS int64             `json:"timeout_ms,omitempty"`
 }
 
-func (task TaskSpec) ExecutionTask() (execution.Task, error) {
-	commands := make([]execution.Command, len(task.Commands))
-	for index, command := range task.Commands {
-		if command.TimeoutMS < 0 || command.TimeoutMS > int64(time.Hour/time.Millisecond) {
-			return execution.Task{}, fmt.Errorf("command %q: timeout_ms must be between 0 and 3600000", command.ID)
-		}
-		timeout := time.Duration(command.TimeoutMS) * time.Millisecond
-		if command.TimeoutMS == 0 {
-			timeout = execution.DefaultTimeout
-		}
-		commands[index] = execution.Command{
-			ID:      command.ID,
-			Shell:   command.Shell,
-			Script:  command.Script,
-			CWD:     command.CWD,
-			Env:     command.Env,
-			Stdin:   command.Stdin,
-			Timeout: timeout,
-		}
+// ExecutionCommand decodes the wire command. A zero timeout becomes the agent
+// default.
+func (spec CommandSpec) ExecutionCommand() (execution.Command, error) {
+	if spec.TimeoutMS < 0 || spec.TimeoutMS > int64(execution.MaxTimeout/time.Millisecond) {
+		return execution.Command{}, fmt.Errorf("timeout_ms must be between 0 and %d", execution.MaxTimeout.Milliseconds())
 	}
-	return execution.Task{ID: task.ID, Mode: task.Mode, Commands: commands}, nil
+	timeout := time.Duration(spec.TimeoutMS) * time.Millisecond
+	if spec.TimeoutMS == 0 {
+		timeout = execution.DefaultTimeout
+	}
+	return execution.Command{
+		Shell:   spec.Shell,
+		Script:  spec.Script,
+		CWD:     spec.CWD,
+		Env:     spec.Env,
+		Stdin:   spec.Stdin,
+		Timeout: timeout,
+	}, nil
 }
 
-// NewTaskSpec encodes a locally built task into its wire form. A zero command
-// timeout is sent as 0, which the agent resolves to its own default.
-func NewTaskSpec(task execution.Task) TaskSpec {
-	commands := make([]CommandSpec, len(task.Commands))
-	for index, command := range task.Commands {
-		commands[index] = CommandSpec{
-			ID:        command.ID,
-			Shell:     command.Shell,
-			Script:    command.Script,
-			CWD:       command.CWD,
-			Env:       command.Env,
-			Stdin:     command.Stdin,
-			TimeoutMS: command.Timeout.Milliseconds(),
-		}
+// NewCommandSpec encodes a command for the wire. A zero timeout is sent as 0,
+// which the agent resolves to its own default.
+func NewCommandSpec(command execution.Command) CommandSpec {
+	return CommandSpec{
+		Shell:     command.Shell,
+		Script:    command.Script,
+		CWD:       command.CWD,
+		Env:       command.Env,
+		Stdin:     command.Stdin,
+		TimeoutMS: command.Timeout.Milliseconds(),
 	}
-	return TaskSpec{ID: task.ID, Mode: task.Mode, Commands: commands}
 }
 
 type ErrorMessage struct {
@@ -104,11 +99,12 @@ type ShellList struct {
 	Shells []execution.Shell `json:"shells"`
 }
 
+// OutputChunk is one decoded output frame; the run it belongs to is implied by
+// the stream it arrived on.
 type OutputChunk struct {
-	Seq       uint64
-	CommandID string
-	Stream    execution.Stream
-	Data      []byte
+	Seq    uint64
+	Stream execution.Stream
+	Data   []byte
 }
 
 func ReadFrame(reader io.Reader) (Frame, error) {
@@ -158,33 +154,25 @@ func UnmarshalPayload(frame Frame, target any) error {
 	return nil
 }
 
+// EncodeOutput packs one output chunk as stream code, sequence and raw bytes.
 func EncodeOutput(chunk execution.Output) ([]byte, error) {
 	if chunk.Stream != execution.StreamStdout && chunk.Stream != execution.StreamStderr {
 		return nil, fmt.Errorf("unsupported output stream %q", chunk.Stream)
-	}
-	if len(chunk.CommandID) > 65535 {
-		return nil, fmt.Errorf("command ID too long")
 	}
 	streamCode := byte(1)
 	if chunk.Stream == execution.StreamStderr {
 		streamCode = 2
 	}
-	payload := make([]byte, 11+len(chunk.CommandID)+len(chunk.Data))
+	payload := make([]byte, 9+len(chunk.Data))
 	payload[0] = streamCode
 	binary.BigEndian.PutUint64(payload[1:9], chunk.Seq)
-	binary.BigEndian.PutUint16(payload[9:11], uint16(len(chunk.CommandID)))
-	copy(payload[11:], chunk.CommandID)
-	copy(payload[11+len(chunk.CommandID):], chunk.Data)
+	copy(payload[9:], chunk.Data)
 	return payload, nil
 }
 
 func DecodeOutput(payload []byte) (OutputChunk, error) {
-	if len(payload) < 11 {
+	if len(payload) < 9 {
 		return OutputChunk{}, fmt.Errorf("output frame is shorter than its header")
-	}
-	commandIDLength := int(binary.BigEndian.Uint16(payload[9:11]))
-	if len(payload) < 11+commandIDLength {
-		return OutputChunk{}, fmt.Errorf("output frame contains a truncated command ID")
 	}
 	stream := execution.StreamStdout
 	switch payload[0] {
@@ -195,10 +183,9 @@ func DecodeOutput(payload []byte) (OutputChunk, error) {
 		return OutputChunk{}, fmt.Errorf("unknown output stream code %d", payload[0])
 	}
 	return OutputChunk{
-		Seq:       binary.BigEndian.Uint64(payload[1:9]),
-		CommandID: string(payload[11 : 11+commandIDLength]),
-		Stream:    stream,
-		Data:      append([]byte(nil), payload[11+commandIDLength:]...),
+		Seq:    binary.BigEndian.Uint64(payload[1:9]),
+		Stream: stream,
+		Data:   append([]byte(nil), payload[9:]...),
 	}, nil
 }
 

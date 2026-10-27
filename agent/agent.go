@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/subtle"
 	"crypto/tls"
 	"encoding/hex"
@@ -24,15 +25,15 @@ import (
 
 const (
 	DefaultListenAddress = ":42424"
-	DefaultMaxTasks      = 64
+	DefaultMaxRuns       = 64
 	DefaultMaxStreams    = 128
-	MaxConfiguredTasks   = 1024
+	MaxConfiguredRuns    = 1024
 	MaxConfiguredStreams = 4096
 	streamHeaderTimeout  = 5 * time.Second
 	initialIdleTimeout   = 10 * time.Second
 	idleStreamTimeout    = 200 * time.Millisecond
 	idleWatchPeriod      = 25 * time.Millisecond
-	taskSlotWait         = 100 * time.Millisecond
+	runSlotWait          = 100 * time.Millisecond
 	streamSlotWaitPeriod = 50 * time.Millisecond
 )
 
@@ -44,7 +45,7 @@ type Config struct {
 	TrustedClientKey     ed25519.PublicKey
 	AllowUnauthenticated bool
 	DisableDiscovery     bool
-	MaxConcurrentTasks   int
+	MaxConcurrentRuns    int
 	MaxConcurrentStreams int
 }
 
@@ -52,28 +53,30 @@ type Agent struct {
 	config   Config
 	identity identity.ServerIdentity
 	tls      *tls.Config
-	tasks    chan struct{}
+	runs     chan struct{}
 	streams  chan struct{}
+	// nextRequestID numbers inbound requests so log lines can be matched.
+	nextRequestID atomic.Uint64
 }
 
 func New(config Config) (*Agent, error) {
 	if config.ListenAddress == "" {
 		config.ListenAddress = DefaultListenAddress
 	}
-	if config.MaxConcurrentTasks < 0 {
-		return nil, fmt.Errorf("max concurrent tasks cannot be negative")
+	if config.MaxConcurrentRuns < 0 {
+		return nil, fmt.Errorf("max concurrent runs cannot be negative")
 	}
 	if config.MaxConcurrentStreams < 0 {
 		return nil, fmt.Errorf("max concurrent streams cannot be negative")
 	}
-	if config.MaxConcurrentTasks == 0 {
-		config.MaxConcurrentTasks = DefaultMaxTasks
+	if config.MaxConcurrentRuns == 0 {
+		config.MaxConcurrentRuns = DefaultMaxRuns
 	}
 	if config.MaxConcurrentStreams == 0 {
 		config.MaxConcurrentStreams = DefaultMaxStreams
 	}
-	if config.MaxConcurrentTasks > MaxConfiguredTasks {
-		return nil, fmt.Errorf("max concurrent tasks cannot exceed %d", MaxConfiguredTasks)
+	if config.MaxConcurrentRuns > MaxConfiguredRuns {
+		return nil, fmt.Errorf("max concurrent runs cannot exceed %d", MaxConfiguredRuns)
 	}
 	if config.MaxConcurrentStreams > MaxConfiguredStreams {
 		return nil, fmt.Errorf("max concurrent streams cannot exceed %d", MaxConfiguredStreams)
@@ -97,7 +100,7 @@ func New(config Config) (*Agent, error) {
 		config:   config,
 		identity: serverIdentity,
 		tls:      tlsConfig,
-		tasks:    make(chan struct{}, config.MaxConcurrentTasks),
+		runs:     make(chan struct{}, config.MaxConcurrentRuns),
 		streams:  make(chan struct{}, config.MaxConcurrentStreams),
 	}, nil
 }
@@ -240,7 +243,7 @@ func (a *Agent) handleConnection(serverCtx context.Context, connection *quic.Con
 				return
 			case <-ticker.C:
 				if idle, elapsed, timeout := isIdle(); idle && elapsed > timeout {
-					_ = connection.CloseWithError(0, "no active task stream")
+					_ = connection.CloseWithError(0, "no active run stream")
 					return
 				}
 			}
@@ -262,9 +265,9 @@ func (a *Agent) handleConnection(serverCtx context.Context, connection *quic.Con
 	var streams sync.WaitGroup
 	defer func() {
 		// Only reached once AcceptStream fails, i.e. the peer finished its last
-		// task stream or the connection broke. Cancel first so in-flight
+		// run stream or the connection broke. Cancel first so in-flight
 		// commands stop before we wait on them. If a graceful "keep the
-		// connection open for more tasks" path is ever added, it must not go
+		// connection open for more runs" path is ever added, it must not go
 		// through this defer.
 		cancel()
 		streams.Wait()
@@ -295,24 +298,30 @@ func (a *Agent) beginStream(connectionCtx context.Context, connection *quic.Conn
 	onStart()
 	defer onEnd()
 
+	request := newRequestLog(a.nextRequestID.Add(1))
+	request.remote = connection.RemoteAddr().String()
 	frame, err := protocol.ReadFrame(stream)
 	if err != nil {
-		a.writeError(stream, fmt.Errorf("read request: %w", err))
+		cause := fmt.Errorf("read request: %w", err)
+		a.writeError(stream, cause)
+		request.finish("failed", cause.Error())
 		return
 	}
 	_ = stream.SetReadDeadline(time.Time{})
 
 	if !a.acquireStreamSlot(connectionCtx) {
 		if connectionCtx.Err() != nil {
+			request.finish("cancelled", "connection closed while waiting for a stream slot")
 			return
 		}
 		a.writeError(stream, fmt.Errorf("agent is at its concurrent stream limit"))
+		request.finish("failed", "agent is at its concurrent stream limit")
 		return
 	}
 	// The slot is released by the same function that acquired it.
 	defer func() { <-a.streams }()
 
-	a.handleStream(connectionCtx, connection, stream, frame)
+	a.handleStream(connectionCtx, connection, stream, frame, request)
 }
 
 // acquireStreamSlot takes a global stream slot, waiting briefly for one to be
@@ -335,99 +344,163 @@ func (a *Agent) acquireStreamSlot(ctx context.Context) bool {
 	}
 }
 
-func (a *Agent) handleStream(connectionCtx context.Context, connection *quic.Conn, stream *quic.Stream, frame protocol.Frame) {
+func (a *Agent) handleStream(connectionCtx context.Context, connection *quic.Conn, stream *quic.Stream, frame protocol.Frame, request *requestLog) {
 	clientID, err := a.authenticatedClientID(connection)
 	if err != nil {
 		a.writeError(stream, err)
+		request.finish("failed", err.Error())
 		return
 	}
 	switch frame.Type {
 	case protocol.FrameListShells:
-		shellList, marshalErr := protocol.MarshalFrame(protocol.FrameShellList, protocol.ShellList{Shells: execution.AvailableShells()})
-		if marshalErr == nil {
-			_ = protocol.WriteFrame(stream, shellList)
-		}
+		a.serveShellList(stream, request)
 		return
-	case protocol.FrameTaskRequest:
+	case protocol.FrameShellRequest:
 	default:
-		a.writeError(stream, fmt.Errorf("expected task or shell-list request, got frame type %d", frame.Type))
+		cause := fmt.Errorf("expected shell or shell-list request, got frame type %d", frame.Type)
+		a.writeError(stream, cause)
+		request.finish("failed", cause.Error())
 		return
 	}
 
-	var request protocol.TaskRequest
-	if err := protocol.UnmarshalPayload(frame, &request); err != nil {
+	var shellRequest protocol.ShellRequest
+	if err := protocol.UnmarshalPayload(frame, &shellRequest); err != nil {
 		a.writeError(stream, err)
+		request.finish("failed", err.Error())
 		return
 	}
-	if clientID != "" && request.ClientID != clientID {
-		a.writeError(stream, fmt.Errorf("client ID does not match the authenticated key"))
+	if clientID != "" && shellRequest.ClientID != clientID {
+		cause := fmt.Errorf("client ID does not match the authenticated key")
+		a.writeError(stream, cause)
+		request.finish("failed", cause.Error())
 		return
 	}
-	if clientID == "" && request.ClientID != "" {
-		a.writeError(stream, fmt.Errorf("client ID supplied without client authentication"))
+	if clientID == "" && shellRequest.ClientID != "" {
+		cause := fmt.Errorf("client ID supplied without client authentication")
+		a.writeError(stream, cause)
+		request.finish("failed", cause.Error())
 		return
 	}
-	task, err := request.Task.ExecutionTask()
+	command, err := shellRequest.Command.ExecutionCommand()
 	if err != nil {
 		a.writeError(stream, err)
+		request.finish("failed", err.Error())
 		return
 	}
+	runID, err := newRunID()
+	if err != nil {
+		a.writeError(stream, err)
+		request.finish("failed", err.Error())
+		return
+	}
+	request.start("shell", runID, describeCommand(clientID, command)...)
 
-	taskWait := time.NewTimer(taskSlotWait)
-	defer taskWait.Stop()
+	runWait := time.NewTimer(runSlotWait)
+	defer runWait.Stop()
 	select {
-	case a.tasks <- struct{}{}:
-		defer func() { <-a.tasks }()
+	case a.runs <- struct{}{}:
+		defer func() { <-a.runs }()
 	case <-connectionCtx.Done():
+		request.finish("cancelled", "connection closed while waiting for a run slot")
 		return
-	case <-taskWait.C:
-		a.writeError(stream, fmt.Errorf("agent is at its concurrent task limit"))
+	case <-runWait.C:
+		cause := fmt.Errorf("agent is at its concurrent run limit")
+		a.writeError(stream, cause)
+		request.finish("failed", cause.Error())
 		return
 	}
 
-	taskCtx, cancel := context.WithCancel(connectionCtx)
+	// Announce the run ID before any output, so the client can query or cancel
+	// this run while it is still going.
+	startedFrame, err := protocol.MarshalFrame(protocol.FrameShellStarted, protocol.ShellStarted{RunID: runID})
+	if err == nil {
+		err = protocol.WriteFrame(stream, startedFrame)
+	}
+	if err != nil {
+		a.writeError(stream, err)
+		request.finish("failed", err.Error())
+		return
+	}
+
+	runCtx, cancel := context.WithCancel(connectionCtx)
 	defer cancel()
 	controlDone := make(chan struct{})
 	go func() {
 		defer close(controlDone)
-		a.readTaskControl(cancel, stream)
+		a.readRunControl(cancel, stream)
 	}()
 	var writeMu sync.Mutex
 	writeFrame := func(frame protocol.Frame) error {
 		writeMu.Lock()
 		defer writeMu.Unlock()
-		if err := taskCtx.Err(); err != nil {
+		if err := runCtx.Err(); err != nil {
 			return err
 		}
 		return protocol.WriteFrame(stream, frame)
 	}
-	result, runErr := execution.Run(taskCtx, task, func(_ context.Context, output execution.Output) error {
+	result, runErr := execution.Run(runCtx, runID, command, func(_ context.Context, output execution.Output) error {
 		payload, encodeErr := protocol.EncodeOutput(output)
 		if encodeErr != nil {
 			return encodeErr
 		}
+		request.countOutput(output.Stream, len(output.Data))
 		return writeFrame(protocol.Frame{Type: protocol.FrameOutput, Payload: payload})
 	})
 	cancel()
 	stream.CancelRead(0)
 	// Do not wait for the reader when the connection is gone, otherwise a dead
-	// peer can hold the stream slot for as long as its TCP/QUIC state survives.
+	// peer can hold the run slot for as long as its TCP/QUIC state survives.
 	select {
 	case <-controlDone:
 	case <-connectionCtx.Done():
 	}
 	if runErr != nil {
 		a.writeError(stream, runErr)
+		request.finish("failed", runErr.Error())
 		return
 	}
-	resultFrame, err := protocol.MarshalFrame(protocol.FrameTaskResult, result)
+	resultFrame, err := protocol.MarshalFrame(protocol.FrameShellResult, result)
 	if err != nil {
 		a.writeError(stream, err)
+		request.finish("failed", err.Error())
 		return
 	}
 	writeMu.Lock()
 	_ = protocol.WriteFrame(stream, resultFrame)
 	writeMu.Unlock()
+	state, exitCode, detail := summarizeResult(result)
+	request.setExit(exitCode)
+	request.finish(state, detail)
+}
+
+// newRunID returns the identifier the agent assigns to one run.
+func newRunID() (string, error) {
+	raw := make([]byte, 6)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("generate run ID: %w", err)
+	}
+	return "sh-" + hex.EncodeToString(raw), nil
+}
+
+// serveShellList answers a shell-list request and logs it like any other
+// request.
+func (a *Agent) serveShellList(stream *quic.Stream, request *requestLog) {
+	request.start("shells", "")
+	shells := execution.AvailableShells()
+	names := make([]string, len(shells))
+	for index, shell := range shells {
+		names[index] = string(shell)
+	}
+	frame, err := protocol.MarshalFrame(protocol.FrameShellList, protocol.ShellList{Shells: shells})
+	if err == nil {
+		err = protocol.WriteFrame(stream, frame)
+	}
+	if err != nil {
+		a.writeError(stream, err)
+		request.finish("failed", err.Error())
+		return
+	}
+	request.finish("succeeded", strings.Join(names, ","))
 }
 
 func (a *Agent) authenticatedClientID(connection *quic.Conn) (string, error) {
@@ -448,9 +521,9 @@ func (a *Agent) authenticatedClientID(connection *quic.Conn) (string, error) {
 	return identity.ClientID(publicKey), nil
 }
 
-func (a *Agent) readTaskControl(cancel context.CancelFunc, stream *quic.Stream) {
-	// A task stream carries exactly one control frame: the client either
-	// cancels or closes its write side, both of which end the task.
+func (a *Agent) readRunControl(cancel context.CancelFunc, stream *quic.Stream) {
+	// A run stream carries exactly one control frame: the client either cancels
+	// or closes its write side, both of which end the run.
 	if _, err := protocol.ReadFrame(stream); err != nil {
 		cancel()
 		return

@@ -15,7 +15,7 @@ import (
 	"remote-shell/identity"
 )
 
-func TestClientListsShellsAndRunsTask(t *testing.T) {
+func TestClientListsShellsAndRunsOneCommand(t *testing.T) {
 	address, privateKey := startAgent(t)
 	connection := dialClient(t, address, privateKey)
 
@@ -33,14 +33,10 @@ func TestClientListsShellsAndRunsTask(t *testing.T) {
 	}
 
 	var stdout, stderr strings.Builder
-	result, err := connection.RunTask(ctx, execution.Task{
-		ID: "client-task",
-		Commands: []execution.Command{{
-			ID:     "client-command",
-			Shell:  execution.ShellBash,
-			Script: "printf hello; printf problem >&2; exit 7",
-			CWD:    t.TempDir(),
-		}},
+	handle, err := connection.StartShell(ctx, execution.Command{
+		Shell:  execution.ShellBash,
+		Script: "printf hello; printf problem >&2; exit 7",
+		CWD:    t.TempDir(),
 	}, func(output execution.Output) error {
 		if output.Stream == execution.StreamStdout {
 			stdout.Write(output.Data)
@@ -52,41 +48,47 @@ func TestClientListsShellsAndRunsTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if handle.ID == "" {
+		t.Fatal("agent did not assign a run ID")
+	}
+	result, err := handle.Wait(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if stdout.String() != "hello" || stderr.String() != "problem" {
 		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
-	if len(result.Commands) != 1 || result.Commands[0].ExitCode != 7 || result.Commands[0].Err != "" {
+	if result.ExitCode != 7 || result.Error != "" || result.RunID != handle.ID {
 		t.Fatalf("unexpected result: %+v", result)
 	}
 }
 
-func TestClientCancelReportsCancelledCommand(t *testing.T) {
+func TestClientCancelReportsCancelledRun(t *testing.T) {
 	address, privateKey := startAgent(t)
 	connection := dialClient(t, address, privateKey)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() {
-		time.Sleep(300 * time.Millisecond)
-		cancel()
-	}()
-	result, err := connection.RunTask(ctx, execution.Task{
-		ID: "cancel-task",
-		Commands: []execution.Command{{
-			ID:     "cancel-command",
-			Shell:  execution.ShellBash,
-			Script: "sleep 30",
-			CWD:    t.TempDir(),
-		}},
+	handle, err := connection.StartShell(ctx, execution.Command{
+		Shell:  execution.ShellBash,
+		Script: "sleep 30",
+		CWD:    t.TempDir(),
 	}, nil)
 	if err != nil {
-		t.Fatalf("cancel should surface as a task result, got %v", err)
+		t.Fatal(err)
 	}
-	if len(result.Commands) != 1 {
-		t.Fatalf("unexpected result: %+v", result)
+	time.Sleep(300 * time.Millisecond)
+	cancel()
+	// The agent reports the cancellation after stopping the process group, so
+	// wait on a context that is independent of the one just cancelled.
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer waitCancel()
+	result, err := handle.Wait(waitCtx)
+	if err != nil {
+		t.Fatalf("cancel should surface as a run result, got %v", err)
 	}
-	if !result.Commands[0].Cancelled {
-		t.Fatalf("command was not cancelled: %+v", result.Commands[0])
+	if !result.Cancelled {
+		t.Fatalf("run was not cancelled: %+v", result)
 	}
 }
 

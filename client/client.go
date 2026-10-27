@@ -1,4 +1,4 @@
-// Package client dials a remote-shell agent and drives tasks over QUIC.
+// Package client dials a remote-shell agent and drives shell runs over QUIC.
 package client
 
 import (
@@ -16,13 +16,13 @@ import (
 const (
 	// dialTimeout bounds the QUIC handshake so a silent peer cannot hang a call.
 	dialTimeout = 10 * time.Second
-	// cancelGrace is how long a cancelled task may still return its final
+	// cancelGrace is how long a cancelled run may still return its final
 	// result, so the caller learns whether the command really stopped.
 	cancelGrace = 5 * time.Second
 )
 
 // Client is one QUIC connection to an agent. A connection carries a single
-// task per call and is cheap to recreate, so callers dial per operation.
+// run per call and is cheap to recreate, so callers dial per operation.
 type Client struct {
 	conn     *quic.Conn
 	clientID string
@@ -102,75 +102,140 @@ func (c *Client) ListShells(ctx context.Context) ([]execution.Shell, error) {
 	}
 }
 
-// RunTask executes one task and streams its output to emit as it arrives. It
-// returns once the agent reports the task result, which also happens for a
-// cancelled task: cancelling ctx closes the stream write side, the agent stops
-// the commands, and the result carries the cancellation flags.
-func (c *Client) RunTask(ctx context.Context, task execution.Task, emit func(execution.Output) error) (execution.TaskResult, error) {
+// Run is one shell run in flight on the agent. Output is drained by a
+// goroutine started by StartShell, so a slow caller cannot stall the agent.
+type Run struct {
+	ID     string
+	stream *quic.Stream
+	done   chan runOutcome
+}
+
+type runOutcome struct {
+	result execution.Result
+	err    error
+}
+
+// StartShell opens a run and returns once the agent has accepted it and
+// assigned a run ID. Output produced from then on is forwarded to emit.
+func (c *Client) StartShell(ctx context.Context, command execution.Command, emit func(execution.Output) error) (*Run, error) {
 	stream, err := c.conn.OpenStreamSync(ctx)
 	if err != nil {
-		return execution.TaskResult{}, fmt.Errorf("open task stream: %w", err)
+		return nil, fmt.Errorf("open run stream: %w", err)
 	}
-	defer stream.Close()
-	defer stream.CancelRead(0)
-	request, err := protocol.MarshalFrame(protocol.FrameTaskRequest, protocol.TaskRequest{
+	request, err := protocol.MarshalFrame(protocol.FrameShellRequest, protocol.ShellRequest{
 		ClientID: c.clientID,
-		Task:     protocol.NewTaskSpec(task),
+		Command:  protocol.NewCommandSpec(command),
 	})
 	if err != nil {
-		return execution.TaskResult{}, err
+		_ = stream.Close()
+		stream.CancelRead(0)
+		return nil, err
 	}
 	if err := protocol.WriteFrame(stream, request); err != nil {
-		return execution.TaskResult{}, fmt.Errorf("send task request: %w", err)
+		_ = stream.Close()
+		stream.CancelRead(0)
+		return nil, fmt.Errorf("send shell request: %w", err)
 	}
-	// A task stream accepts exactly one control frame, so the write side stays
-	// open until the caller cancels; closing it is the cancellation signal.
+	response, err := protocol.ReadFrame(stream)
+	if err != nil {
+		_ = stream.Close()
+		stream.CancelRead(0)
+		return nil, fmt.Errorf("read run start: %w", err)
+	}
+	switch response.Type {
+	case protocol.FrameShellStarted:
+		var started protocol.ShellStarted
+		if err := protocol.UnmarshalPayload(response, &started); err != nil {
+			_ = stream.Close()
+			stream.CancelRead(0)
+			return nil, err
+		}
+		run := &Run{ID: started.RunID, stream: stream, done: make(chan runOutcome, 1)}
+		go run.drain(ctx, emit)
+		return run, nil
+	case protocol.FrameError:
+		_ = stream.Close()
+		stream.CancelRead(0)
+		return nil, decodeError(response)
+	default:
+		_ = stream.Close()
+		stream.CancelRead(0)
+		return nil, fmt.Errorf("unexpected frame type %d before a run started", response.Type)
+	}
+}
+
+// drain forwards output until the agent reports the result or the stream ends.
+// Cancelling the caller's context closes the write side, which is how the agent
+// is told to stop the run.
+func (r *Run) drain(ctx context.Context, emit func(execution.Output) error) {
+	defer r.stream.CancelRead(0)
 	cancelled := make(chan struct{})
 	defer close(cancelled)
 	go func() {
 		select {
 		case <-ctx.Done():
-			_ = stream.Close()
-			_ = stream.SetReadDeadline(time.Now().Add(cancelGrace))
+			_ = r.stream.Close()
+			_ = r.stream.SetReadDeadline(time.Now().Add(cancelGrace))
 		case <-cancelled:
 		}
 	}()
 	for {
-		frame, readErr := protocol.ReadFrame(stream)
-		if readErr != nil {
-			return execution.TaskResult{}, fmt.Errorf("read task response: %w", readErr)
+		frame, err := protocol.ReadFrame(r.stream)
+		if err != nil {
+			r.done <- runOutcome{err: fmt.Errorf("read run response: %w", err)}
+			return
 		}
 		switch frame.Type {
 		case protocol.FrameOutput:
-			chunk, decodeErr := protocol.DecodeOutput(frame.Payload)
-			if decodeErr != nil {
-				return execution.TaskResult{}, decodeErr
+			chunk, err := protocol.DecodeOutput(frame.Payload)
+			if err != nil {
+				r.done <- runOutcome{err: err}
+				return
 			}
 			if emit == nil {
 				continue
 			}
 			if err := emit(execution.Output{
-				TaskID:    task.ID,
-				CommandID: chunk.CommandID,
-				Seq:       chunk.Seq,
-				Stream:    chunk.Stream,
-				Data:      chunk.Data,
-				At:        time.Now(),
+				RunID:  r.ID,
+				Seq:    chunk.Seq,
+				Stream: chunk.Stream,
+				Data:   chunk.Data,
+				At:     time.Now(),
 			}); err != nil {
-				return execution.TaskResult{}, err
+				r.done <- runOutcome{err: err}
+				return
 			}
-		case protocol.FrameTaskResult:
-			var result execution.TaskResult
+		case protocol.FrameShellResult:
+			var result execution.Result
 			if err := protocol.UnmarshalPayload(frame, &result); err != nil {
-				return execution.TaskResult{}, err
+				r.done <- runOutcome{err: err}
+				return
 			}
-			return result, nil
+			r.done <- runOutcome{result: result}
+			return
 		case protocol.FrameError:
-			return execution.TaskResult{}, decodeError(frame)
+			r.done <- runOutcome{err: decodeError(frame)}
+			return
 		default:
-			return execution.TaskResult{}, fmt.Errorf("unexpected frame type %d in task response", frame.Type)
+			r.done <- runOutcome{err: fmt.Errorf("unexpected frame type %d in run response", frame.Type)}
+			return
 		}
 	}
+}
+
+// Wait blocks until the run ends or ctx is done.
+func (r *Run) Wait(ctx context.Context) (execution.Result, error) {
+	select {
+	case outcome := <-r.done:
+		return outcome.result, outcome.err
+	case <-ctx.Done():
+		return execution.Result{}, ctx.Err()
+	}
+}
+
+// Cancel tells the agent to stop the run.
+func (r *Run) Cancel() error {
+	return r.stream.Close()
 }
 
 func decodeError(frame protocol.Frame) error {

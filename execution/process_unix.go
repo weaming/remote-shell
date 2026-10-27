@@ -26,14 +26,14 @@ var (
 	readerDrainGrace = 5 * time.Second
 )
 
-func runCommand(parent context.Context, taskID string, command Command, emitter *outputEmitter) CommandResult {
-	result := CommandResult{CommandID: command.ID, ExitCode: -1, StartedAt: time.Now()}
+func runCommand(parent context.Context, command Command, emitter *outputEmitter) Result {
+	result := Result{ExitCode: -1, StartedAt: time.Now()}
 	ctx, cancel := context.WithTimeout(parent, command.Timeout)
 	defer cancel()
 
 	cmd, err := shellCommand(command.Shell, command.Script)
 	if err != nil {
-		result.Err = err.Error()
+		result.Error = err.Error()
 		result.EndedAt = time.Now()
 		return result
 	}
@@ -44,7 +44,7 @@ func runCommand(parent context.Context, taskID string, command Command, emitter 
 
 	stdoutReader, stdoutWriter, err := os.Pipe()
 	if err != nil {
-		result.Err = fmt.Sprintf("create stdout pipe: %v", err)
+		result.Error = fmt.Sprintf("create stdout pipe: %v", err)
 		result.EndedAt = time.Now()
 		return result
 	}
@@ -52,7 +52,7 @@ func runCommand(parent context.Context, taskID string, command Command, emitter 
 	if err != nil {
 		_ = stdoutReader.Close()
 		_ = stdoutWriter.Close()
-		result.Err = fmt.Sprintf("create stderr pipe: %v", err)
+		result.Error = fmt.Sprintf("create stderr pipe: %v", err)
 		result.EndedAt = time.Now()
 		return result
 	}
@@ -61,14 +61,14 @@ func runCommand(parent context.Context, taskID string, command Command, emitter 
 
 	if err := ctx.Err(); err != nil {
 		closePipes(stdoutReader, stdoutWriter, stderrReader, stderrWriter)
-		result.ExitCode, result.Cancelled, result.TimedOut, result.Err =
-			classifyResult(false, nil, err, "")
+		result.ExitCode, result.Cancelled, result.TimedOut, result.Error =
+			classifyResult(false, nil, err, result.Error)
 		result.EndedAt = time.Now()
 		return result
 	}
 	if err := cmd.Start(); err != nil {
 		closePipes(stdoutReader, stdoutWriter, stderrReader, stderrWriter)
-		result.Err = fmt.Sprintf("start command: %v", err)
+		result.Error = fmt.Sprintf("start command: %v", err)
 		result.EndedAt = time.Now()
 		return result
 	}
@@ -79,8 +79,8 @@ func runCommand(parent context.Context, taskID string, command Command, emitter 
 	var readers sync.WaitGroup
 	readers.Add(2)
 	readerErrors := make(chan error, 2)
-	go copyOutput(ctx, stdoutReader, command.ID, StreamStdout, emitter, cancel, &readers, readerErrors)
-	go copyOutput(ctx, stderrReader, command.ID, StreamStderr, emitter, cancel, &readers, readerErrors)
+	go copyOutput(ctx, stdoutReader, StreamStdout, emitter, cancel, &readers, readerErrors)
+	go copyOutput(ctx, stderrReader, StreamStderr, emitter, cancel, &readers, readerErrors)
 
 	waitResult := make(chan error, 1)
 	go func() { waitResult <- cmd.Wait() }()
@@ -102,25 +102,25 @@ func runCommand(parent context.Context, taskID string, command Command, emitter 
 	select {
 	case readerErr := <-readerErrors:
 		if readerErr != nil {
-			result.Err = readerErr.Error()
+			result.Error = readerErr.Error()
 		}
 	default:
 	}
 
-	result.ExitCode, result.Cancelled, result.TimedOut, result.Err =
-		classifyResult(shellExited, waitErr, ctx.Err(), result.Err)
+	result.ExitCode, result.Cancelled, result.TimedOut, result.Error =
+		classifyResult(shellExited, waitErr, ctx.Err(), result.Error)
 	result.EndedAt = time.Now()
 	return result
 }
 
-func copyOutput(ctx context.Context, reader *os.File, commandID string, stream Stream, emitter *outputEmitter, cancel context.CancelFunc, wait *sync.WaitGroup, errs chan<- error) {
+func copyOutput(ctx context.Context, reader *os.File, stream Stream, emitter *outputEmitter, cancel context.CancelFunc, wait *sync.WaitGroup, errs chan<- error) {
 	defer wait.Done()
 	defer reader.Close()
 	buffer := make([]byte, outputChunkSize)
 	for {
 		count, err := reader.Read(buffer)
 		if count > 0 {
-			if writeErr := emitter.emit(ctx, commandID, stream, buffer[:count]); writeErr != nil {
+			if writeErr := emitter.emit(ctx, stream, buffer[:count]); writeErr != nil {
 				cancel()
 				select {
 				case errs <- fmt.Errorf("forward %s output: %w", stream, writeErr):
@@ -170,7 +170,7 @@ func waitReaderDrain(done <-chan struct{}, grace time.Duration) bool {
 
 // drainOutput terminates whatever is left of the process group and returns only
 // after the output readers finished, so a leaked pipe holder can never block a
-// task result forever.
+// run result forever.
 func drainOutput(readersDone <-chan struct{}, stdout, stderr *os.File, processGroupID int, shellExited bool) {
 	if shellExited {
 		// The shell is gone but descendants may still hold the pipes or run.

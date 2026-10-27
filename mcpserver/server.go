@@ -1,8 +1,10 @@
 // Package mcpserver exposes a remote-shell agent to MCP clients.
 //
-// Each run_command call opens one QUIC connection to the agent, runs a single
-// command, and records the output in a bounded buffer. Output can be read while
-// the command is still running, split by stream, and re-read after completion.
+// Each shell call opens one QUIC connection to the agent, runs a single command,
+// and records the output in a bounded buffer. Output can be read while the
+// command is still running, split by stream, and re-read after completion. The
+// run ID comes from the agent, so every later query uses the agent's own name
+// for that run.
 package mcpserver
 
 import (
@@ -28,19 +30,19 @@ import (
 )
 
 const (
-	// DefaultMaxOutputBytes bounds retained output per task.
+	// DefaultMaxOutputBytes bounds retained output per run.
 	DefaultMaxOutputBytes = 8 << 20
-	// DefaultTaskRetention is how long a finished task stays queryable.
-	DefaultTaskRetention = 30 * time.Minute
-	// DefaultRetainedTasks caps how many tasks the registry keeps.
-	DefaultRetainedTasks = 64
+	// DefaultRunRetention is how long a finished run stays queryable.
+	DefaultRunRetention = 30 * time.Minute
+	// DefaultRetainedRuns caps how many runs the registry keeps.
+	DefaultRetainedRuns = 64
 	// DefaultDiscoveryWait is the mDNS lookup budget for one call.
 	DefaultDiscoveryWait = 1500 * time.Millisecond
 	// MaxDiscoveryWait caps the caller-supplied discovery budget.
 	MaxDiscoveryWait = 10 * time.Second
-	// defaultOutputChunk is the default task_output response size.
+	// defaultOutputChunk is the default shell_output response size.
 	defaultOutputChunk = 64 << 10
-	// maxOutputChunk is the largest single task_output response.
+	// maxOutputChunk is the largest single shell_output response.
 	maxOutputChunk = 1 << 20
 	// dialBudget bounds the total time spent trying candidate addresses.
 	dialBudget = 8 * time.Second
@@ -79,15 +81,15 @@ type Config struct {
 	ClientKey      ed25519.PrivateKey
 	DefaultNode    string
 	MaxOutputBytes int64
-	TaskRetention  time.Duration
-	RetainedTasks  int
+	RunRetention   time.Duration
+	RetainedRuns   int
 	DiscoveryWait  time.Duration
 }
 
 // Server serves the MCP tools for one client key.
 type Server struct {
 	config    Config
-	tasks     *registry
+	runs      *registry
 	discovery *nodeCache
 	// browse overrides the mDNS lookup, which tests replace to keep discovery
 	// deterministic.
@@ -106,18 +108,18 @@ func New(config Config) (*Server, error) {
 	if config.MaxOutputBytes == 0 {
 		config.MaxOutputBytes = DefaultMaxOutputBytes
 	}
-	if config.TaskRetention == 0 {
-		config.TaskRetention = DefaultTaskRetention
+	if config.RunRetention == 0 {
+		config.RunRetention = DefaultRunRetention
 	}
-	if config.RetainedTasks == 0 {
-		config.RetainedTasks = DefaultRetainedTasks
+	if config.RetainedRuns == 0 {
+		config.RetainedRuns = DefaultRetainedRuns
 	}
 	if config.DiscoveryWait <= 0 {
 		config.DiscoveryWait = DefaultDiscoveryWait
 	}
 	return &Server{
 		config:    config,
-		tasks:     newRegistry(config.RetainedTasks, config.TaskRetention),
+		runs:      newRegistry(config.RetainedRuns, config.RunRetention),
 		discovery: newNodeCache(),
 	}, nil
 }
@@ -145,36 +147,35 @@ func (s *Server) NewMCPServer() *mcp.Server {
 		Description: "Report which shells (bash, fish, zsh) the target agent can actually run.",
 	}, s.listShells)
 	mcp.AddTool(server, &mcp.Tool{
-		Name:  "run_command",
-		Title: "Run command",
-		Description: "Run one shell script on a target agent. By default the call returns once the command " +
-			"finishes, with the interleaved stdout and stderr plus the exit code. With background=true it " +
-			"returns immediately with a task_id; use task_status and task_output to follow it. A non-zero exit " +
-			"code is reported as a normal result, not as a tool error.",
-	}, s.runCommand)
+		Name:  "shell",
+		Title: "Run a shell command",
+		Description: "Run one shell command on an agent. The agent assigns the run ID that every later call uses. " +
+			"By default this waits for the command to finish and returns the interleaved stdout and stderr plus the " +
+			"exit code; with background=true it returns the run ID as soon as the agent accepts the command. A " +
+			"non-zero exit code is a normal result, not a tool error.",
+	}, s.runShell)
 	mcp.AddTool(server, &mcp.Tool{
-		Name:  "task_status",
-		Title: "Task status",
-		Description: "Report the state, exit code, timing and byte counters of a task started by run_command. " +
-			"Works for running and finished tasks.",
-	}, s.taskStatus)
+		Name:  "shell_status",
+		Title: "Run status",
+		Description: "Report the state, exit code, timing and byte counters of a run started by shell. " +
+			"Works for running and finished runs.",
+	}, s.shellStatus)
 	mcp.AddTool(server, &mcp.Tool{
-		Name:  "task_output",
-		Title: "Task output",
-		Description: "Read task output by page. stream selects the interleaved view (all) or a single stream " +
+		Name:  "shell_output",
+		Title: "Run output",
+		Description: "Read a run's output by page. stream selects the interleaved view (all) or a single stream " +
 			"(stdout, stderr); offset and limit page through it in bytes. next_offset tells you where to continue.",
-	}, s.taskOutput)
+	}, s.shellOutput)
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "list_tasks",
-		Title:       "List tasks",
-		Description: "List the tasks this bridge still remembers, oldest first, with their current state.",
-	}, s.listTasks)
+		Name:        "shell_cancel",
+		Title:       "Cancel run",
+		Description: "Cancel a running run. Its process group is terminated: SIGTERM, then SIGKILL after the agent's grace period.",
+	}, s.shellCancel)
 	mcp.AddTool(server, &mcp.Tool{
-		Name:  "cancel_task",
-		Title: "Cancel task",
-		Description: "Cancel a running task. Its process group is terminated: SIGTERM, then SIGKILL after the " +
-			"agent's grace period.",
-	}, s.cancelTask)
+		Name:        "list_runs",
+		Title:       "List runs",
+		Description: "List the runs this bridge still remembers, oldest first, with their current state.",
+	}, s.listRuns)
 	return server
 }
 
@@ -290,6 +291,7 @@ func (s *Server) discoverNodes(ctx context.Context, _ *mcp.CallToolRequest, inpu
 		return nil, discoverNodesOutput{}, err
 	}
 	s.discovery.set(found)
+	logDiscovered(found)
 	views := make([]nodeView, 0, len(found))
 	for _, node := range found {
 		addresses := preferAddresses(node.Addresses)
@@ -355,7 +357,7 @@ func (s *Server) listShells(ctx context.Context, _ *mcp.CallToolRequest, input n
 		listShellsOutput{Node: address, Shells: names}, nil
 }
 
-type runCommandInput struct {
+type shellInput struct {
 	Node       string            `json:"node,omitempty" jsonschema:"agent address host:port, host name, or a node ID; when omitted the bridge uses --node, otherwise the only agent it discovered on the local network"`
 	Shell      string            `json:"shell" jsonschema:"shell that runs the script: bash, fish or zsh; use list_shells to see what the agent has"`
 	Script     string            `json:"script" jsonschema:"script text passed to the shell with -c"`
@@ -363,11 +365,11 @@ type runCommandInput struct {
 	Env        map[string]string `json:"env,omitempty" jsonschema:"extra environment variables for the command"`
 	Stdin      string            `json:"stdin,omitempty" jsonschema:"text written to the command's stdin"`
 	TimeoutMS  int64             `json:"timeout_ms,omitempty" jsonschema:"command timeout in milliseconds; 0 uses the agent default of 300000, maximum 3600000"`
-	Background bool              `json:"background,omitempty" jsonschema:"return immediately with a task_id instead of waiting for the command to finish"`
+	Background bool              `json:"background,omitempty" jsonschema:"return the run ID as soon as the agent accepts the command instead of waiting for it to finish"`
 }
 
-type runCommandOutput struct {
-	TaskID       string `json:"task_id"`
+type shellRunOutput struct {
+	RunID        string `json:"run_id"`
 	Node         string `json:"node"`
 	State        string `json:"state"`
 	ExitCode     int    `json:"exit_code"`
@@ -379,35 +381,30 @@ type runCommandOutput struct {
 	Background   bool   `json:"background,omitempty"`
 }
 
-func (s *Server) runCommand(ctx context.Context, _ *mcp.CallToolRequest, input runCommandInput) (*mcp.CallToolResult, runCommandOutput, error) {
+func (s *Server) runShell(ctx context.Context, _ *mcp.CallToolRequest, input shellInput) (*mcp.CallToolResult, shellRunOutput, error) {
 	shell := execution.Shell(strings.TrimSpace(input.Shell))
 	if !slices.Contains([]execution.Shell{execution.ShellBash, execution.ShellFish, execution.ShellZsh}, shell) {
-		return nil, runCommandOutput{}, fmt.Errorf("shell must be one of bash, fish, zsh")
+		return nil, shellRunOutput{}, fmt.Errorf("shell must be one of bash, fish, zsh")
 	}
 	if strings.TrimSpace(input.Script) == "" {
-		return nil, runCommandOutput{}, fmt.Errorf("script is required")
+		return nil, shellRunOutput{}, fmt.Errorf("script is required")
 	}
 	cwd := strings.TrimSpace(input.CWD)
 	if cwd == "" {
-		return nil, runCommandOutput{}, fmt.Errorf("cwd is required")
+		return nil, shellRunOutput{}, fmt.Errorf("cwd is required")
 	}
 	if !filepath.IsAbs(cwd) {
-		return nil, runCommandOutput{}, fmt.Errorf("cwd must be an absolute path")
+		return nil, shellRunOutput{}, fmt.Errorf("cwd must be an absolute path")
 	}
 	timeout := time.Duration(input.TimeoutMS) * time.Millisecond
 	if input.TimeoutMS < 0 || timeout > execution.MaxTimeout {
-		return nil, runCommandOutput{}, fmt.Errorf("timeout_ms must be between 0 and %d", execution.MaxTimeout.Milliseconds())
+		return nil, shellRunOutput{}, fmt.Errorf("timeout_ms must be between 0 and %d", execution.MaxTimeout.Milliseconds())
 	}
 	target, err := s.resolveNode(ctx, input.Node)
 	if err != nil {
-		return nil, runCommandOutput{}, err
-	}
-	taskID, err := newTaskID()
-	if err != nil {
-		return nil, runCommandOutput{}, err
+		return nil, shellRunOutput{}, err
 	}
 	command := execution.Command{
-		ID:      "c1",
 		Shell:   shell,
 		Script:  input.Script,
 		CWD:     cwd,
@@ -415,76 +412,97 @@ func (s *Server) runCommand(ctx context.Context, _ *mcp.CallToolRequest, input r
 		Stdin:   []byte(input.Stdin),
 		Timeout: timeout,
 	}
-	// A foreground task follows the requesting call, so an MCP cancellation
-	// stops the command. A background task outlives the call on purpose.
+	// A foreground run follows the requesting call, so an MCP cancellation
+	// stops the command. A background run outlives the call on purpose.
 	parent := ctx
 	if input.Background {
 		parent = context.WithoutCancel(ctx)
 	}
-	taskCtx, cancel := context.WithCancel(parent)
-	record := newTask(taskCtx, cancel, taskID, input.Node, target, command, s.config.MaxOutputBytes)
-	s.tasks.add(record)
-	s.startTask(taskCtx, record, execution.Task{ID: taskID, Mode: execution.ModeParallel, Commands: []execution.Command{command}})
+	runCtx, cancel := context.WithCancel(parent)
+	defer func() {
+		if input.Background {
+			// The run keeps using this context after the call returns.
+			return
+		}
+	}()
+	record := newRun(runCtx, cancel, input.Node, target, command, s.config.MaxOutputBytes)
+	s.startRun(runCtx, record, command)
+	select {
+	case <-record.ready:
+	case <-record.done:
+		return s.renderRun(record)
+	case <-ctx.Done():
+		cancel()
+		return nil, shellRunOutput{}, ctx.Err()
+	}
 	if input.Background {
-		message := fmt.Sprintf("started task %s on %s in the background; poll with task_status and task_output", taskID, target.describe())
-		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: message}}},
-			runCommandOutput{TaskID: taskID, Node: target.describe(), State: string(stateRunning), Background: true}, nil
+		text := fmt.Sprintf("started %s on %s in the background; poll with shell_status and shell_output",
+			record.ID(), target.describe())
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}},
+			shellRunOutput{RunID: record.ID(), Node: target.describe(), State: string(stateRunning), Background: true}, nil
 	}
 	select {
 	case <-record.done:
+		cancel()
 	case <-ctx.Done():
-		return nil, runCommandOutput{}, ctx.Err()
+		cancel()
+		return nil, shellRunOutput{}, ctx.Err()
 	}
-	return s.renderTask(record)
+	return s.renderRun(record)
 }
 
-// startTask runs one task on its own connection and closes the record when it
-// returns, whether that took a millisecond or an hour.
-func (s *Server) startTask(ctx context.Context, record *task, task execution.Task) {
+// startRun dials, hands the command to the agent, and drains the result. The run
+// is registered as soon as the agent assigns its ID.
+func (s *Server) startRun(ctx context.Context, record *run, command execution.Command) {
 	go func() {
 		defer close(record.done)
-		// dialTarget resolves again from the cache and re-searches if the
-		// cached addresses no longer answer.
 		connection, target, err := s.dialTarget(ctx, record.selector)
 		if err != nil {
-			record.complete(execution.TaskResult{}, err)
+			record.fail(err)
 			return
 		}
-		record.setNode(target.describe())
 		defer connection.Close()
-		result, runErr := connection.RunTask(ctx, task, func(output execution.Output) error {
+		handle, err := connection.StartShell(ctx, command, func(output execution.Output) error {
 			record.buf.Append(output.Stream, output.Data)
 			return nil
 		})
-		record.complete(result, runErr)
+		if err != nil {
+			record.fail(err)
+			return
+		}
+		record.setHandle(handle, target.describe())
+		s.runs.add(record)
+		record.markReady()
+		// Wait out the agent's final result even after a cancel: the run is
+		// already stopped, and the read side has its own drain deadline.
+		result, waitErr := handle.Wait(context.WithoutCancel(ctx))
+		record.complete(result, waitErr)
 	}()
 }
 
-// renderTask formats a finished task for a run_command reply.
-func (s *Server) renderTask(record *task) (*mcp.CallToolResult, runCommandOutput, error) {
+// renderRun formats a finished or failed run for a shell reply.
+func (s *Server) renderRun(record *run) (*mcp.CallToolResult, shellRunOutput, error) {
 	snap := record.snapshot()
 	data, start, _, _ := record.buf.read("", 0, 0)
 	text := string(data)
 	if start > 0 {
-		text = fmt.Sprintf("[dropped %d earlier bytes; read the retained tail with task_output]\n", start) + text
+		text = fmt.Sprintf("[dropped %d earlier bytes; read the retained tail with shell_output]\n", start) + text
 	}
 	if strings.TrimSpace(text) == "" {
 		text = "(no output)"
 	}
-	meta := fmt.Sprintf("task=%s state=%s exit_code=%d duration=%s node=%s",
-		snap.ID, snap.State, snap.ExitCode, snap.duration().Round(time.Millisecond), snap.Node)
+	meta := describeRun(snap)
 	if snap.ErrText != "" {
 		meta += " error=" + snap.ErrText
 	}
+	// One text block keeps the run ID visible to every client, including
+	// hand-written ones that only print the first block.
 	result := &mcp.CallToolResult{
-		Content: []mcp.Content{
-			&mcp.TextContent{Text: text},
-			&mcp.TextContent{Text: meta},
-		},
+		Content: []mcp.Content{&mcp.TextContent{Text: text + "\n\n" + meta}},
 		IsError: snap.ErrText != "" || snap.State == stateCancelled || snap.State == stateTimedOut,
 	}
-	return result, runCommandOutput{
-		TaskID:       snap.ID,
+	return result, shellRunOutput{
+		RunID:        snap.ID,
 		Node:         snap.Node,
 		State:        string(snap.State),
 		ExitCode:     snap.ExitCode,
@@ -496,12 +514,12 @@ func (s *Server) renderTask(record *task) (*mcp.CallToolResult, runCommandOutput
 	}, nil
 }
 
-type taskIDInput struct {
-	TaskID string `json:"task_id" jsonschema:"task ID returned by run_command"`
+type runIDInput struct {
+	RunID string `json:"run_id" jsonschema:"run ID assigned by the agent, returned by shell"`
 }
 
-type taskStatusOutput struct {
-	TaskID       string `json:"task_id"`
+type shellStatusOutput struct {
+	RunID        string `json:"run_id"`
 	Node         string `json:"node"`
 	Shell        string `json:"shell"`
 	Script       string `json:"script"`
@@ -516,20 +534,9 @@ type taskStatusOutput struct {
 	TrimmedBytes int64  `json:"trimmed_bytes"`
 }
 
-func (s *Server) taskStatus(_ context.Context, _ *mcp.CallToolRequest, input taskIDInput) (*mcp.CallToolResult, taskStatusOutput, error) {
-	record, ok := s.tasks.get(input.TaskID)
-	if !ok {
-		return nil, taskStatusOutput{}, fmt.Errorf("unknown task %q", input.TaskID)
-	}
-	snap := record.snapshot()
-	text := fmt.Sprintf("%s state=%s exit_code=%d done=%t elapsed=%s stdout=%d stderr=%d trimmed=%d",
-		snap.ID, snap.State, snap.ExitCode, snap.Done, snap.duration().Round(time.Millisecond),
-		snap.StdoutBytes, snap.StderrBytes, snap.TrimmedBytes)
-	if snap.ErrText != "" {
-		text += " error=" + snap.ErrText
-	}
-	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}, taskStatusOutput{
-		TaskID:       snap.ID,
+func statusOf(snap snapshot) shellStatusOutput {
+	return shellStatusOutput{
+		RunID:        snap.ID,
 		Node:         snap.Node,
 		Shell:        string(snap.Shell),
 		Script:       snap.Script,
@@ -542,18 +549,33 @@ func (s *Server) taskStatus(_ context.Context, _ *mcp.CallToolRequest, input tas
 		StdoutBytes:  snap.StdoutBytes,
 		StderrBytes:  snap.StderrBytes,
 		TrimmedBytes: snap.TrimmedBytes,
-	}, nil
+	}
 }
 
-type taskOutputInput struct {
-	TaskID string `json:"task_id" jsonschema:"task ID returned by run_command"`
+func (s *Server) shellStatus(_ context.Context, _ *mcp.CallToolRequest, input runIDInput) (*mcp.CallToolResult, shellStatusOutput, error) {
+	record, ok := s.runs.get(input.RunID)
+	if !ok {
+		return nil, shellStatusOutput{}, fmt.Errorf("unknown run %q", input.RunID)
+	}
+	snap := record.snapshot()
+	text := fmt.Sprintf("%s state=%s exit_code=%d done=%t elapsed=%s stdout=%d stderr=%d trimmed=%d",
+		snap.ID, snap.State, snap.ExitCode, snap.Done, snap.duration().Round(time.Millisecond),
+		snap.StdoutBytes, snap.StderrBytes, snap.TrimmedBytes)
+	if snap.ErrText != "" {
+		text += " error=" + snap.ErrText
+	}
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}, statusOf(snap), nil
+}
+
+type shellOutputInput struct {
+	RunID  string `json:"run_id" jsonschema:"run ID assigned by the agent, returned by shell"`
 	Stream string `json:"stream,omitempty" jsonschema:"which view to read: all (interleaved, default), stdout or stderr"`
 	Offset int64  `json:"offset,omitempty" jsonschema:"byte offset to start from, as returned in next_offset"`
 	Limit  int64  `json:"limit,omitempty" jsonschema:"maximum bytes to return, default 65536, maximum 1048576"`
 }
 
-type taskOutputOutput struct {
-	TaskID     string `json:"task_id"`
+type shellOutputResult struct {
+	RunID      string `json:"run_id"`
 	Stream     string `json:"stream"`
 	Offset     int64  `json:"offset"`
 	NextOffset int64  `json:"next_offset"`
@@ -565,14 +587,14 @@ type taskOutputOutput struct {
 	Error      string `json:"error,omitempty"`
 }
 
-func (s *Server) taskOutput(_ context.Context, _ *mcp.CallToolRequest, input taskOutputInput) (*mcp.CallToolResult, taskOutputOutput, error) {
-	record, ok := s.tasks.get(input.TaskID)
+func (s *Server) shellOutput(_ context.Context, _ *mcp.CallToolRequest, input shellOutputInput) (*mcp.CallToolResult, shellOutputResult, error) {
+	record, ok := s.runs.get(input.RunID)
 	if !ok {
-		return nil, taskOutputOutput{}, fmt.Errorf("unknown task %q", input.TaskID)
+		return nil, shellOutputResult{}, fmt.Errorf("unknown run %q", input.RunID)
 	}
 	view, err := parseStream(input.Stream)
 	if err != nil {
-		return nil, taskOutputOutput{}, err
+		return nil, shellOutputResult{}, err
 	}
 	limit := input.Limit
 	if limit <= 0 {
@@ -588,8 +610,8 @@ func (s *Server) taskOutput(_ context.Context, _ *mcp.CallToolRequest, input tas
 	if text == "" {
 		text = "(no output yet)"
 	}
-	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}, taskOutputOutput{
-		TaskID:     snap.ID,
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}, shellOutputResult{
+		RunID:      snap.ID,
 		Stream:     viewName(view),
 		Offset:     start,
 		NextOffset: next,
@@ -602,58 +624,44 @@ func (s *Server) taskOutput(_ context.Context, _ *mcp.CallToolRequest, input tas
 	}, nil
 }
 
-type listTasksOutput struct {
-	Tasks []taskStatusOutput `json:"tasks"`
+type listRunsOutput struct {
+	Runs []shellStatusOutput `json:"runs"`
 }
 
-func (s *Server) listTasks(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, listTasksOutput, error) {
-	snapshots := s.tasks.list()
-	entries := make([]taskStatusOutput, 0, len(snapshots))
+func (s *Server) listRuns(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, listRunsOutput, error) {
+	snapshots := s.runs.list()
+	entries := make([]shellStatusOutput, 0, len(snapshots))
 	lines := make([]string, 0, len(snapshots))
 	for _, snap := range snapshots {
-		entries = append(entries, taskStatusOutput{
-			TaskID:       snap.ID,
-			Node:         snap.Node,
-			Shell:        string(snap.Shell),
-			Script:       snap.Script,
-			CWD:          snap.CWD,
-			State:        string(snap.State),
-			Done:         snap.Done,
-			ExitCode:     snap.ExitCode,
-			Error:        snap.ErrText,
-			ElapsedMS:    snap.duration().Milliseconds(),
-			StdoutBytes:  snap.StdoutBytes,
-			StderrBytes:  snap.StderrBytes,
-			TrimmedBytes: snap.TrimmedBytes,
-		})
+		entries = append(entries, statusOf(snap))
 		lines = append(lines, fmt.Sprintf("%s %s exit=%d %s", snap.ID, snap.State, snap.ExitCode, snap.CWD))
 	}
-	text := "no tasks yet"
+	text := "no runs yet"
 	if len(lines) > 0 {
 		text = strings.Join(lines, "\n")
 	}
-	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}, listTasksOutput{Tasks: entries}, nil
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}, listRunsOutput{Runs: entries}, nil
 }
 
-type cancelTaskOutput struct {
-	TaskID string `json:"task_id"`
-	State  string `json:"state"`
-	Note   string `json:"note"`
+type shellCancelOutput struct {
+	RunID string `json:"run_id"`
+	State string `json:"state"`
+	Note  string `json:"note"`
 }
 
-func (s *Server) cancelTask(_ context.Context, _ *mcp.CallToolRequest, input taskIDInput) (*mcp.CallToolResult, cancelTaskOutput, error) {
-	record, ok := s.tasks.get(input.TaskID)
+func (s *Server) shellCancel(_ context.Context, _ *mcp.CallToolRequest, input runIDInput) (*mcp.CallToolResult, shellCancelOutput, error) {
+	record, ok := s.runs.get(input.RunID)
 	if !ok {
-		return nil, cancelTaskOutput{}, fmt.Errorf("unknown task %q", input.TaskID)
+		return nil, shellCancelOutput{}, fmt.Errorf("unknown run %q", input.RunID)
 	}
 	snap := record.snapshot()
-	note := "task already finished"
+	note := "run already finished"
 	if !snap.Done {
-		record.cancel()
+		record.cancelRun()
 		note = "cancellation requested; the agent terminates the process group and reports the final state"
 	}
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: snap.ID + ": " + note}}},
-		cancelTaskOutput{TaskID: snap.ID, State: string(snap.State), Note: note}, nil
+		shellCancelOutput{RunID: snap.ID, State: string(snap.State), Note: note}, nil
 }
 
 // dialTarget is where a call should connect: the node it resolved to, whether
@@ -860,11 +868,4 @@ func printable(data []byte) string {
 		return string(data)
 	}
 	return strings.ToValidUTF8(string(data), "\uFFFD")
-}
-
-func (s snapshot) duration() time.Duration {
-	if s.Finished.IsZero() {
-		return time.Since(s.Started)
-	}
-	return s.Finished.Sub(s.Started)
 }

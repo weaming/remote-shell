@@ -78,8 +78,8 @@ func resolveServeConfig(args []string) (config agent.Config, handled bool, err e
 	clientKeyHex := flags.String("client-public-key", agent.EmbeddedTrustedClientPublicKeyHex, "trusted client Ed25519 public key in hex")
 	allowUnauthenticated := flags.Bool("allow-unauthenticated", false, "allow clients without a trusted client key")
 	disableDiscovery := flags.Bool("no-discovery", false, "disable LAN mDNS advertisement")
-	maxTasks := flags.Int("max-tasks", agent.DefaultMaxTasks, "maximum concurrently executing tasks")
-	maxStreams := flags.Int("max-streams", agent.DefaultMaxStreams, "maximum concurrently accepted task streams")
+	maxTasks := flags.Int("max-runs", agent.DefaultMaxRuns, "maximum concurrently executing runs")
+	maxStreams := flags.Int("max-streams", agent.DefaultMaxStreams, "maximum concurrently accepted run streams")
 	flags.Usage = func() {
 		fmt.Fprintln(os.Stdout, "Usage: remote-shell serve [options]")
 		flags.PrintDefaults()
@@ -122,12 +122,12 @@ func resolveServeConfig(args []string) (config agent.Config, handled bool, err e
 		TrustedClientKey:     trustedKey,
 		AllowUnauthenticated: *allowUnauthenticated,
 		DisableDiscovery:     *disableDiscovery,
-		MaxConcurrentTasks:   *maxTasks,
+		MaxConcurrentRuns:    *maxTasks,
 		MaxConcurrentStreams: *maxStreams,
 	}, false, nil
 }
 
-// runMCP serves the MCP bridge, which turns each tool call into a task on a
+// runMCP serves the MCP bridge, which turns each tool call into a run on a
 // remote agent. Logs and errors go to stderr so stdout stays a clean protocol
 // channel for the stdio transport.
 func runMCP(args []string) error {
@@ -138,7 +138,7 @@ func runMCP(args []string) error {
 	authToken := flags.String("auth-token", "", "bearer token required on every HTTP request (--transport http)")
 	clientKeyPath := flags.String("client-key", filepath.Join("keys", "client.key"), "client private key; empty connects only to an unauthenticated agent")
 	node := flags.String("node", "", "default agent address as host:port")
-	maxOutputBytes := flags.Int64("max-output-bytes", mcpserver.DefaultMaxOutputBytes, "retained output bytes per task")
+	maxOutputBytes := flags.Int64("max-output-bytes", mcpserver.DefaultMaxOutputBytes, "retained output bytes per run")
 	discoveryWait := flags.Duration("discovery-wait", mcpserver.DefaultDiscoveryWait, "mDNS lookup budget per tool call")
 	flags.Usage = func() {
 		fmt.Fprintln(flags.Output(), "Usage: remote-shell mcp [options]")

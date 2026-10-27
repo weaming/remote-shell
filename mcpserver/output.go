@@ -6,7 +6,7 @@ import (
 	"remote-shell/execution"
 )
 
-// outputBuffer keeps a bounded window of task output in arrival order while
+// outputBuffer keeps a bounded window of run output in arrival order while
 // tracking absolute byte offsets, so a reader can page through what is still
 // retained and learn how much of the beginning was dropped.
 //
@@ -97,12 +97,6 @@ func (b *outputBuffer) read(stream execution.Stream, offset, limit int64) (data 
 		data = append(data, chunk.data[from:to]...)
 	}
 	return data, offset, end, end < total
-}
-
-func (b *outputBuffer) retained(stream execution.Stream) int64 {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.retainedLocked(stream)
 }
 
 func (b *outputBuffer) retainedLocked(stream execution.Stream) int64 {

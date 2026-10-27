@@ -33,7 +33,7 @@ func TestToolsRunAndInspectOneCommand(t *testing.T) {
 	for _, tool := range tools.Tools {
 		names = append(names, tool.Name)
 	}
-	for _, expected := range []string{"discover_nodes", "list_shells", "run_command", "task_status", "task_output", "list_tasks", "cancel_task"} {
+	for _, expected := range []string{"discover_nodes", "list_shells", "shell", "shell_status", "shell_output", "list_runs", "shell_cancel"} {
 		if !slices.Contains(names, expected) {
 			t.Fatalf("tool %q missing from %v", expected, names)
 		}
@@ -45,7 +45,7 @@ func TestToolsRunAndInspectOneCommand(t *testing.T) {
 	}
 
 	cwd := t.TempDir()
-	run := callTool(t, session, "run_command", map[string]any{
+	run := callTool(t, session, "shell", map[string]any{
 		"shell":  "bash",
 		"script": "printf out; printf err >&2; exit 3",
 		"cwd":    cwd,
@@ -61,27 +61,27 @@ func TestToolsRunAndInspectOneCommand(t *testing.T) {
 	if exitCode := int(runData["exit_code"].(float64)); exitCode != 3 {
 		t.Fatalf("exit_code=%d, want 3", exitCode)
 	}
-	taskID, _ := runData["task_id"].(string)
-	if taskID == "" {
+	runID, _ := runData["run_id"].(string)
+	if runID == "" {
 		t.Fatal("run_command did not return a task ID")
 	}
 
-	stdout := callTool(t, session, "task_output", map[string]any{"task_id": taskID, "stream": "stdout"})
+	stdout := callTool(t, session, "shell_output", map[string]any{"run_id": runID, "stream": "stdout"})
 	if got := strings.TrimSpace(resultText(stdout)); got != "out" {
 		t.Fatalf("stdout view = %q, want %q", got, "out")
 	}
-	stderr := callTool(t, session, "task_output", map[string]any{"task_id": taskID, "stream": "stderr"})
+	stderr := callTool(t, session, "shell_output", map[string]any{"run_id": runID, "stream": "stderr"})
 	if got := strings.TrimSpace(resultText(stderr)); got != "err" {
 		t.Fatalf("stderr view = %q, want %q", got, "err")
 	}
 
-	status := structured(t, callTool(t, session, "task_status", map[string]any{"task_id": taskID}))
+	status := structured(t, callTool(t, session, "shell_status", map[string]any{"run_id": runID}))
 	if status["done"] != true || int(status["exit_code"].(float64)) != 3 {
 		t.Fatalf("unexpected task status: %v", status)
 	}
-	listed := structured(t, callTool(t, session, "list_tasks", map[string]any{}))
-	if tasks, ok := listed["tasks"].([]any); !ok || len(tasks) != 1 {
-		t.Fatalf("list_tasks = %v, want one task", listed["tasks"])
+	listed := structured(t, callTool(t, session, "list_runs", map[string]any{}))
+	if runs, ok := listed["runs"].([]any); !ok || len(runs) != 1 {
+		t.Fatalf("list_runs = %v, want one run", listed["runs"])
 	}
 }
 
@@ -90,30 +90,30 @@ func TestBackgroundTaskReportsOutputAndCancellation(t *testing.T) {
 	address, privateKey := startAgent(t)
 	session := newSession(t, newBridge(t, address, privateKey))
 
-	started := structured(t, callTool(t, session, "run_command", map[string]any{
+	started := structured(t, callTool(t, session, "shell", map[string]any{
 		"shell":      "bash",
 		"script":     "printf start; sleep 1; printf done",
 		"cwd":        t.TempDir(),
 		"background": true,
 	}))
-	taskID, _ := started["task_id"].(string)
-	if taskID == "" {
+	runID, _ := started["run_id"].(string)
+	if runID == "" {
 		t.Fatal("background run did not return a task ID")
 	}
-	waitForState(t, session, taskID, stateSucceeded, 20*time.Second)
-	output := callTool(t, session, "task_output", map[string]any{"task_id": taskID, "stream": "stdout"})
+	waitForState(t, session, runID, stateSucceeded, 20*time.Second)
+	output := callTool(t, session, "shell_output", map[string]any{"run_id": runID, "stream": "stdout"})
 	if got := resultText(output); got != "startdone" {
 		t.Fatalf("background stdout = %q, want %q", got, "startdone")
 	}
 
-	running := structured(t, callTool(t, session, "run_command", map[string]any{
+	running := structured(t, callTool(t, session, "shell", map[string]any{
 		"shell":      "bash",
 		"script":     "sleep 30",
 		"cwd":        t.TempDir(),
 		"background": true,
 	}))
-	cancelID, _ := running["task_id"].(string)
-	cancelTool := callTool(t, session, "cancel_task", map[string]any{"task_id": cancelID})
+	cancelID, _ := running["run_id"].(string)
+	cancelTool := callTool(t, session, "shell_cancel", map[string]any{"run_id": cancelID})
 	if cancelTool.IsError {
 		t.Fatalf("cancel_task failed: %s", resultText(cancelTool))
 	}
@@ -126,7 +126,7 @@ func TestInvalidInputIsReportedAsToolError(t *testing.T) {
 		t.Fatal(err)
 	}
 	session := newSession(t, bridge)
-	result := callTool(t, session, "run_command", map[string]any{
+	result := callTool(t, session, "shell", map[string]any{
 		"shell":  "tcsh",
 		"script": "true",
 		"cwd":    t.TempDir(),
@@ -134,7 +134,7 @@ func TestInvalidInputIsReportedAsToolError(t *testing.T) {
 	if !result.IsError {
 		t.Fatalf("unsupported shell must be a tool error: %s", resultText(result))
 	}
-	unknown := callTool(t, session, "task_output", map[string]any{"task_id": "t-missing"})
+	unknown := callTool(t, session, "shell_output", map[string]any{"run_id": "t-missing"})
 	if !unknown.IsError {
 		t.Fatalf("unknown task must be a tool error: %s", resultText(unknown))
 	}
@@ -218,7 +218,7 @@ func TestHTTPServesOnlyTheSupportedRevisions(t *testing.T) {
 				}
 				return
 			}
-			if !strings.Contains(string(body), "run_command") {
+			if !strings.Contains(string(body), "shell") {
 				t.Fatalf("tools missing from response: %s", body)
 			}
 			if session := response.Header.Get("Mcp-Session-Id"); session != "" {
@@ -302,7 +302,7 @@ func TestRunCommandUsesTheOnlyDiscoveredAgent(t *testing.T) {
 	bridge.discovery.set([]cachedNode{{ID: "node-only", Addresses: []string{"127.0.0.1:1", address}}})
 	session := newSession(t, bridge)
 
-	result := callTool(t, session, "run_command", map[string]any{
+	result := callTool(t, session, "shell", map[string]any{
 		"shell":  "bash",
 		"script": "printf auto",
 		"cwd":    t.TempDir(),
@@ -331,7 +331,7 @@ func TestRunCommandRefusesAmbiguousDiscovery(t *testing.T) {
 		{ID: "node-b", Addresses: []string{"127.0.0.1:2"}},
 	})
 	session := newSession(t, bridge)
-	result := callTool(t, session, "run_command", map[string]any{
+	result := callTool(t, session, "shell", map[string]any{
 		"shell":  "bash",
 		"script": "true",
 		"cwd":    t.TempDir(),
@@ -430,16 +430,16 @@ func callTool(t *testing.T, session *mcp.ClientSession, name string, args map[st
 	return result
 }
 
-func waitForState(t *testing.T, session *mcp.ClientSession, taskID string, want taskState, budget time.Duration) {
+func waitForState(t *testing.T, session *mcp.ClientSession, runID string, want runState, budget time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(budget)
 	for {
-		status := structured(t, callTool(t, session, "task_status", map[string]any{"task_id": taskID}))
+		status := structured(t, callTool(t, session, "shell_status", map[string]any{"run_id": runID}))
 		if status["state"] == string(want) {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("task %s stayed at %v, want %s", taskID, status["state"], want)
+			t.Fatalf("task %s stayed at %v, want %s", runID, status["state"], want)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

@@ -50,8 +50,8 @@ func TestOutputBufferTrimsOldestBytesAndReportsOffsets(t *testing.T) {
 	buffer.Append(execution.StreamStdout, []byte("bbbb"))
 	buffer.Append(execution.StreamStdout, []byte("cccc"))
 
-	if got := buffer.retained(""); got != 8 {
-		t.Fatalf("retained=%d, want 8", got)
+	if data, start, _, _ := buffer.read("", 0, 0); len(data) != 8 || start != 4 {
+		t.Fatalf("retained=%q start=%d, want 8 bytes from offset 4", data, start)
 	}
 	if got := buffer.trimmed(""); got != 4 {
 		t.Fatalf("trimmed=%d, want 4", got)
@@ -71,9 +71,8 @@ func TestOutputBufferPartialTrimKeepsByteAccounting(t *testing.T) {
 	buffer := newOutputBuffer(5)
 	buffer.Append(execution.StreamStdout, []byte("0123456789"))
 
-	retained := buffer.retained("")
-	if retained != 5 {
-		t.Fatalf("retained=%d, want 5", retained)
+	if data, start, _, _ := buffer.read("", 0, 0); len(data) != 5 || start != 5 {
+		t.Fatalf("retained=%q start=%d, want 5 bytes from offset 5", data, start)
 	}
 	if got := buffer.trimmed(""); got != 5 {
 		t.Fatalf("trimmed=%d, want 5", got)
