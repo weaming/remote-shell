@@ -25,16 +25,18 @@ const (
 // the caller can re-read output, switch between stdout and stderr, and inspect
 // the exit code without re-running anything.
 type task struct {
-	id      string
-	addrs   []string
-	shell   execution.Shell
-	script  string
-	cwd     string
-	ctx     context.Context
-	cancel  context.CancelFunc
-	buf     *outputBuffer
-	done    chan struct{}
-	started time.Time
+	id       string
+	selector string
+	nodeID   string
+	addrs    []string
+	shell    execution.Shell
+	script   string
+	cwd      string
+	ctx      context.Context
+	cancel   context.CancelFunc
+	buf      *outputBuffer
+	done     chan struct{}
+	started  time.Time
 
 	mu         sync.Mutex
 	node       string
@@ -45,19 +47,21 @@ type task struct {
 	finished   bool
 }
 
-func newTask(ctx context.Context, cancel context.CancelFunc, id string, addresses []string, command execution.Command, maxOutputBytes int64) *task {
+func newTask(ctx context.Context, cancel context.CancelFunc, id, selector string, target dialTarget, command execution.Command, maxOutputBytes int64) *task {
 	return &task{
-		id:      id,
-		addrs:   append([]string(nil), addresses...),
-		shell:   command.Shell,
-		script:  command.Script,
-		cwd:     command.CWD,
-		ctx:     ctx,
-		cancel:  cancel,
-		buf:     newOutputBuffer(maxOutputBytes),
-		done:    make(chan struct{}),
-		started: time.Now(),
-		state:   stateRunning,
+		id:       id,
+		selector: selector,
+		nodeID:   target.nodeID,
+		addrs:    append([]string(nil), target.addresses...),
+		shell:    command.Shell,
+		script:   command.Script,
+		cwd:      command.CWD,
+		ctx:      ctx,
+		cancel:   cancel,
+		buf:      newOutputBuffer(maxOutputBytes),
+		done:     make(chan struct{}),
+		started:  time.Now(),
+		state:    stateRunning,
 	}
 }
 

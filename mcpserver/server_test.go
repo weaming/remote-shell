@@ -290,6 +290,111 @@ func TestDialCandidatesFallsBackPastDeadAddress(t *testing.T) {
 	}
 }
 
+// Without --node, an omitted node argument falls back to the only discovered
+// agent, and the address that answered is remembered for later calls.
+func TestRunCommandUsesTheOnlyDiscoveredAgent(t *testing.T) {
+	requireBash(t)
+	address, privateKey := startAgent(t)
+	bridge, err := New(Config{ClientKey: privateKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge.discovery.set([]cachedNode{{ID: "node-only", Addresses: []string{"127.0.0.1:1", address}}})
+	session := newSession(t, bridge)
+
+	result := callTool(t, session, "run_command", map[string]any{
+		"shell":  "bash",
+		"script": "printf auto",
+		"cwd":    t.TempDir(),
+	})
+	if result.IsError {
+		t.Fatalf("run_command failed: %s", resultText(result))
+	}
+	if got := resultText(result); !strings.Contains(got, "auto") {
+		t.Fatalf("output = %q, want the command output", got)
+	}
+	bridge.discovery.mu.Lock()
+	remembered := bridge.discovery.lastGood["node-only"]
+	bridge.discovery.mu.Unlock()
+	if remembered != address {
+		t.Fatalf("remembered address = %q, want %q", remembered, address)
+	}
+}
+
+func TestRunCommandRefusesAmbiguousDiscovery(t *testing.T) {
+	bridge, err := New(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge.discovery.set([]cachedNode{
+		{ID: "node-a", Addresses: []string{"127.0.0.1:1"}},
+		{ID: "node-b", Addresses: []string{"127.0.0.1:2"}},
+	})
+	session := newSession(t, bridge)
+	result := callTool(t, session, "run_command", map[string]any{
+		"shell":  "bash",
+		"script": "true",
+		"cwd":    t.TempDir(),
+	})
+	if !result.IsError {
+		t.Fatalf("ambiguous discovery must fail: %s", resultText(result))
+	}
+	text := resultText(result)
+	for _, want := range []string{"node-a", "node-b"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("error %q does not mention %q", text, want)
+		}
+	}
+}
+
+// A cached node that no longer answers must trigger a fresh search and one
+// retry, not a hard failure.
+func TestDialTargetSearchesAgainAfterAFailedConnection(t *testing.T) {
+	requireBash(t)
+	address, privateKey := startAgent(t)
+	bridge, err := New(Config{ClientKey: privateKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge.discovery.set([]cachedNode{{ID: "node-stale", Addresses: []string{"127.0.0.1:1"}}})
+	searches := 0
+	bridge.browse = func(context.Context) ([]cachedNode, error) {
+		searches++
+		return []cachedNode{{ID: "node-stale", Addresses: []string{address}}}, nil
+	}
+
+	connection, target, err := bridge.dialTarget(context.Background(), "node-stale")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	if target.describe() != address {
+		t.Fatalf("connected to %q, want %q", target.describe(), address)
+	}
+	if searches != 1 {
+		t.Fatalf("searches = %d, want exactly one re-search", searches)
+	}
+}
+
+func TestDialTargetUsesTheCachedNodeWithoutSearching(t *testing.T) {
+	requireBash(t)
+	address, privateKey := startAgent(t)
+	bridge, err := New(Config{ClientKey: privateKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge.discovery.set([]cachedNode{{ID: "node-live", Addresses: []string{address}}})
+	bridge.browse = func(context.Context) ([]cachedNode, error) {
+		t.Error("a working cached node must not trigger a new search")
+		return nil, nil
+	}
+	connection, _, err := bridge.dialTarget(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+}
+
 func newBridge(t *testing.T, address string, privateKey ed25519.PrivateKey) *Server {
 	t.Helper()
 	bridge, err := New(Config{ClientKey: privateKey, DefaultNode: address})

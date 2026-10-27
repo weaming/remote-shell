@@ -23,7 +23,6 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"remote-shell/client"
-	"remote-shell/discovery"
 	"remote-shell/execution"
 	"remote-shell/protocol"
 )
@@ -87,8 +86,12 @@ type Config struct {
 
 // Server serves the MCP tools for one client key.
 type Server struct {
-	config Config
-	tasks  *registry
+	config    Config
+	tasks     *registry
+	discovery *nodeCache
+	// browse overrides the mDNS lookup, which tests replace to keep discovery
+	// deterministic.
+	browse func(context.Context) ([]cachedNode, error)
 }
 
 func New(config Config) (*Server, error) {
@@ -112,7 +115,11 @@ func New(config Config) (*Server, error) {
 	if config.DiscoveryWait <= 0 {
 		config.DiscoveryWait = DefaultDiscoveryWait
 	}
-	return &Server{config: config, tasks: newRegistry(config.RetainedTasks, config.TaskRetention)}, nil
+	return &Server{
+		config:    config,
+		tasks:     newRegistry(config.RetainedTasks, config.TaskRetention),
+		discovery: newNodeCache(),
+	}, nil
 }
 
 // NewMCPServer builds the MCP server and registers every tool.
@@ -278,64 +285,46 @@ func (s *Server) discoverNodes(ctx context.Context, _ *mcp.CallToolRequest, inpu
 	if input.WaitMS > 0 {
 		wait = min(time.Duration(input.WaitMS)*time.Millisecond, MaxDiscoveryWait)
 	}
-	browseCtx, cancel := context.WithTimeout(ctx, wait)
-	defer cancel()
-	nodes, err := discovery.Browse(browseCtx)
+	found, err := s.browseNodesFor(ctx, wait)
 	if err != nil {
-		return nil, discoverNodesOutput{}, fmt.Errorf("start mDNS discovery: %w", err)
+		return nil, discoverNodesOutput{}, err
 	}
-	merged := make(map[string]*nodeView)
-	for {
-		select {
-		case <-browseCtx.Done():
-			views := make([]nodeView, 0, len(merged))
-			for _, view := range merged {
-				slices.Sort(view.Addresses)
-				views = append(views, *view)
-			}
-			slices.SortFunc(views, func(left, right nodeView) int { return strings.Compare(left.ID, right.ID) })
-			lines := make([]string, 0, len(views))
-			for _, view := range views {
-				// An agent advertises one address per interface, which is far
-				// too noisy for a prompt; the structured reply keeps them all.
-				shown := view.Addresses
-				suffix := ""
-				if len(shown) > maxShownAddresses {
-					suffix = fmt.Sprintf(" +%d more", len(shown)-maxShownAddresses)
-					shown = shown[:maxShownAddresses]
-				}
-				lines = append(lines, fmt.Sprintf("%s auth=%t %s %s",
-					view.ID, view.AuthRequired, strings.Join(shown, ",")+suffix, view.Hostname))
-			}
-			text := "no agent announced itself; pass an explicit host:port as node"
-			if len(lines) > 0 {
-				text = strings.Join(lines, "\n")
-			}
-			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}},
-				discoverNodesOutput{Nodes: views, WaitedMS: wait.Milliseconds()}, nil
-		case node, ok := <-nodes:
-			if !ok {
-				// The channel closes when the browse context ends; keep waiting
-				// for that so the reply carries the whole window.
-				nodes = nil
-				continue
-			}
-			view, seen := merged[node.ID]
-			if !seen {
-				view = &nodeView{ID: node.ID, Instance: node.Instance, Hostname: node.Hostname, AuthRequired: node.AuthRequired}
-				merged[node.ID] = view
-			}
-			for _, address := range node.Addresses {
-				if !slices.Contains(view.Addresses, address) {
-					view.Addresses = append(view.Addresses, address)
-				}
-			}
+	s.discovery.set(found)
+	views := make([]nodeView, 0, len(found))
+	for _, node := range found {
+		addresses := preferAddresses(node.Addresses)
+		views = append(views, nodeView{
+			ID:           node.ID,
+			Instance:     node.Instance,
+			Hostname:     node.Hostname,
+			Addresses:    addresses,
+			AuthRequired: node.AuthRequired,
+		})
+	}
+	slices.SortFunc(views, func(left, right nodeView) int { return strings.Compare(left.ID, right.ID) })
+	lines := make([]string, 0, len(views))
+	for _, view := range views {
+		// An agent advertises one address per interface, which is far too noisy
+		// for a prompt; the structured reply keeps them all.
+		shown := view.Addresses
+		suffix := ""
+		if len(shown) > maxShownAddresses {
+			suffix = fmt.Sprintf(" +%d more", len(shown)-maxShownAddresses)
+			shown = shown[:maxShownAddresses]
 		}
+		lines = append(lines, fmt.Sprintf("%s auth=%t %s %s",
+			view.ID, view.AuthRequired, strings.Join(shown, ",")+suffix, view.Hostname))
 	}
+	text := "no agent announced itself; pass an explicit host:port as node"
+	if len(lines) > 0 {
+		text = strings.Join(lines, "\n")
+	}
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}},
+		discoverNodesOutput{Nodes: views, WaitedMS: wait.Milliseconds()}, nil
 }
 
 type nodeInput struct {
-	Node string `json:"node,omitempty" jsonschema:"agent address host:port, or a node ID from discover_nodes; defaults to the bridge's --node"`
+	Node string `json:"node,omitempty" jsonschema:"agent address host:port, host name, or a node ID; when omitted the bridge uses --node, otherwise the only agent it discovered on the local network"`
 }
 
 type listShellsOutput struct {
@@ -344,11 +333,7 @@ type listShellsOutput struct {
 }
 
 func (s *Server) listShells(ctx context.Context, _ *mcp.CallToolRequest, input nodeInput) (*mcp.CallToolResult, listShellsOutput, error) {
-	candidates, err := s.resolveNode(ctx, input.Node)
-	if err != nil {
-		return nil, listShellsOutput{}, err
-	}
-	connection, address, err := s.dialCandidates(ctx, candidates)
+	connection, target, err := s.dialTarget(ctx, input.Node)
 	if err != nil {
 		return nil, listShellsOutput{}, err
 	}
@@ -357,6 +342,7 @@ func (s *Server) listShells(ctx context.Context, _ *mcp.CallToolRequest, input n
 	if err != nil {
 		return nil, listShellsOutput{}, err
 	}
+	address := target.describe()
 	names := make([]string, len(shells))
 	for index, shell := range shells {
 		names[index] = string(shell)
@@ -370,7 +356,7 @@ func (s *Server) listShells(ctx context.Context, _ *mcp.CallToolRequest, input n
 }
 
 type runCommandInput struct {
-	Node       string            `json:"node,omitempty" jsonschema:"agent address host:port, or a node ID from discover_nodes; defaults to the bridge's --node"`
+	Node       string            `json:"node,omitempty" jsonschema:"agent address host:port, host name, or a node ID; when omitted the bridge uses --node, otherwise the only agent it discovered on the local network"`
 	Shell      string            `json:"shell" jsonschema:"shell that runs the script: bash, fish or zsh; use list_shells to see what the agent has"`
 	Script     string            `json:"script" jsonschema:"script text passed to the shell with -c"`
 	CWD        string            `json:"cwd" jsonschema:"absolute working directory on the agent host"`
@@ -412,7 +398,7 @@ func (s *Server) runCommand(ctx context.Context, _ *mcp.CallToolRequest, input r
 	if input.TimeoutMS < 0 || timeout > execution.MaxTimeout {
 		return nil, runCommandOutput{}, fmt.Errorf("timeout_ms must be between 0 and %d", execution.MaxTimeout.Milliseconds())
 	}
-	candidates, err := s.resolveNode(ctx, input.Node)
+	target, err := s.resolveNode(ctx, input.Node)
 	if err != nil {
 		return nil, runCommandOutput{}, err
 	}
@@ -436,13 +422,13 @@ func (s *Server) runCommand(ctx context.Context, _ *mcp.CallToolRequest, input r
 		parent = context.WithoutCancel(ctx)
 	}
 	taskCtx, cancel := context.WithCancel(parent)
-	record := newTask(taskCtx, cancel, taskID, candidates, command, s.config.MaxOutputBytes)
+	record := newTask(taskCtx, cancel, taskID, input.Node, target, command, s.config.MaxOutputBytes)
 	s.tasks.add(record)
 	s.startTask(taskCtx, record, execution.Task{ID: taskID, Mode: execution.ModeParallel, Commands: []execution.Command{command}})
 	if input.Background {
-		message := fmt.Sprintf("started task %s on %s in the background; poll with task_status and task_output", taskID, candidates[0])
+		message := fmt.Sprintf("started task %s on %s in the background; poll with task_status and task_output", taskID, target.describe())
 		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: message}}},
-			runCommandOutput{TaskID: taskID, Node: candidates[0], State: string(stateRunning), Background: true}, nil
+			runCommandOutput{TaskID: taskID, Node: target.describe(), State: string(stateRunning), Background: true}, nil
 	}
 	select {
 	case <-record.done:
@@ -457,12 +443,14 @@ func (s *Server) runCommand(ctx context.Context, _ *mcp.CallToolRequest, input r
 func (s *Server) startTask(ctx context.Context, record *task, task execution.Task) {
 	go func() {
 		defer close(record.done)
-		connection, address, err := s.dialCandidates(ctx, record.dialAddresses())
+		// dialTarget resolves again from the cache and re-searches if the
+		// cached addresses no longer answer.
+		connection, target, err := s.dialTarget(ctx, record.selector)
 		if err != nil {
 			record.complete(execution.TaskResult{}, err)
 			return
 		}
-		record.setNode(address)
+		record.setNode(target.describe())
 		defer connection.Close()
 		result, runErr := connection.RunTask(ctx, task, func(output execution.Output) error {
 			record.buf.Append(output.Stream, output.Data)
@@ -668,51 +656,103 @@ func (s *Server) cancelTask(_ context.Context, _ *mcp.CallToolRequest, input tas
 		cancelTaskOutput{TaskID: snap.ID, State: string(snap.State), Note: note}, nil
 }
 
-// resolveNode turns a caller-supplied selector into candidate dial addresses,
-// most promising first. An empty selector uses the bridge default, a value with
-// a port is used verbatim, and anything else is resolved through a short mDNS
-// lookup. An agent advertises one address per interface, so a lookup yields
-// several candidates and only some of them are reachable from here.
-func (s *Server) resolveNode(ctx context.Context, selector string) ([]string, error) {
+// dialTarget is where a call should connect: the node it resolved to, whether
+// that came from discovery, plus candidate addresses in dial order.
+type dialTarget struct {
+	nodeID     string
+	discovered bool
+	addresses  []string
+}
+
+func (t dialTarget) describe() string {
+	if len(t.addresses) == 0 {
+		return ""
+	}
+	return t.addresses[0]
+}
+
+// resolveNode turns a caller-supplied selector into a dial target. An empty
+// selector uses the bridge default and otherwise the only discovered agent, a
+// value with a port is used verbatim, and anything else is matched against
+// discovery by node ID or host name. An agent advertises one address per
+// interface, so the target carries several candidates ranked for dialing.
+func (s *Server) resolveNode(ctx context.Context, selector string) (dialTarget, error) {
 	selector = strings.TrimSpace(selector)
 	if selector == "" {
-		if s.config.DefaultNode == "" {
-			return nil, fmt.Errorf("no node given and no default node configured; call discover_nodes first")
+		if s.config.DefaultNode != "" {
+			return dialTarget{addresses: []string{s.config.DefaultNode}}, nil
 		}
-		return []string{s.config.DefaultNode}, nil
+		nodes, err := s.knownNodes(ctx)
+		if err != nil {
+			return dialTarget{}, err
+		}
+		node, err := chooseNode(nodes)
+		if err != nil {
+			return dialTarget{}, err
+		}
+		return s.targetFor(node), nil
 	}
 	if _, _, err := splitHostPort(selector); err == nil {
-		return []string{selector}, nil
+		return dialTarget{addresses: []string{selector}}, nil
 	}
-	browseCtx, cancel := context.WithTimeout(ctx, s.config.DiscoveryWait)
-	defer cancel()
-	nodes, err := discovery.Browse(browseCtx)
+	// A node ID or host name: use the cached result, searching only if it is
+	// absent from what we already know.
+	nodes, err := s.knownNodes(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("start mDNS discovery: %w", err)
+		return dialTarget{}, err
 	}
-	var candidates []string
-	for {
-		select {
-		case <-browseCtx.Done():
-			if len(candidates) == 0 {
-				return nil, fmt.Errorf("no agent matches %q; pass its address as host:port", selector)
-			}
-			return preferAddresses(candidates), nil
-		case node, ok := <-nodes:
-			if !ok {
-				nodes = nil
-				continue
-			}
-			if node.ID != selector && !strings.EqualFold(strings.TrimSuffix(node.Hostname, "."), selector) {
-				continue
-			}
-			for _, address := range node.Addresses {
-				if !slices.Contains(candidates, address) {
-					candidates = append(candidates, address)
-				}
-			}
+	if node, found := matchNode(nodes, selector); found {
+		return s.targetFor(node), nil
+	}
+	return dialTarget{}, fmt.Errorf("no agent matches %q; pass its address as host:port", selector)
+}
+
+// targetFor builds the dial target of a discovered node.
+func (s *Server) targetFor(node cachedNode) dialTarget {
+	return dialTarget{
+		nodeID:     node.ID,
+		discovered: true,
+		addresses:  preferAddresses(s.discovery.preferred(node)),
+	}
+}
+
+func matchNode(nodes []cachedNode, selector string) (cachedNode, bool) {
+	for _, node := range nodes {
+		if node.ID == selector || strings.EqualFold(strings.TrimSuffix(node.Hostname, "."), selector) {
+			return node, true
 		}
 	}
+	return cachedNode{}, false
+}
+
+// dialTarget connects to a resolved target. A discovered target that no longer
+// answers invalidates the cached result and is resolved again from a fresh
+// search, once.
+func (s *Server) dialTarget(ctx context.Context, selector string) (*client.Client, dialTarget, error) {
+	target, err := s.resolveNode(ctx, selector)
+	if err != nil {
+		return nil, target, err
+	}
+	connection, address, err := s.dialCandidates(ctx, target.addresses)
+	if err == nil {
+		s.discovery.remember(target.nodeID, address)
+		return connection, target, nil
+	}
+	if !target.discovered {
+		return nil, target, err
+	}
+	log.Printf("agent %s did not answer (%v); dropping the discovery cache and searching again", target.describe(), err)
+	s.discovery.invalidate()
+	target, resolveErr := s.resolveNode(ctx, selector)
+	if resolveErr != nil {
+		return nil, target, err
+	}
+	connection, address, err = s.dialCandidates(ctx, target.addresses)
+	if err != nil {
+		return nil, target, err
+	}
+	s.discovery.remember(target.nodeID, address)
+	return connection, target, nil
 }
 
 // preferAddresses ranks dial candidates: IPv4 first, then routable IPv6, then
