@@ -675,9 +675,9 @@ func startAgent(t *testing.T) (string, ed25519.PrivateKey) {
 	port := packetConn.LocalAddr().(*net.UDPAddr).Port
 	packetConn.Close()
 	instance, err := agent.New(agent.Config{
-		Name:             "test-agent",
 		ListenAddress:    fmt.Sprintf("127.0.0.1:%d", port),
-		StateDir:         t.TempDir(),
+		Name:             "test-agent",
+		StateBaseDir:     t.TempDir(),
 		TrustedClientKey: publicKey,
 		DisableDiscovery: true,
 	})

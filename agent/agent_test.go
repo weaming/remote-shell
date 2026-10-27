@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -31,7 +32,8 @@ func TestAgentStreamsAuthenticatedRun(t *testing.T) {
 	}
 	server, err := New(Config{
 		ListenAddress:    fmt.Sprintf("127.0.0.1:%d", port),
-		StateDir:         t.TempDir(),
+		Name:             "test-agent",
+		StateBaseDir:     t.TempDir(),
 		TrustedClientKey: publicKey,
 		DisableDiscovery: true,
 	})
@@ -249,7 +251,8 @@ func TestAgentAllowsExplicitUnauthenticatedMode(t *testing.T) {
 	}
 	server, err := New(Config{
 		ListenAddress:        fmt.Sprintf("127.0.0.1:%d", port),
-		StateDir:             t.TempDir(),
+		Name:                 "test-agent",
+		StateBaseDir:         t.TempDir(),
 		AllowUnauthenticated: true,
 		DisableDiscovery:     true,
 	})
@@ -312,20 +315,49 @@ func TestAgentAllowsExplicitUnauthenticatedMode(t *testing.T) {
 	_ = connection.CloseWithError(0, "test complete")
 }
 
-func TestResolveAndSanitizeAgentName(t *testing.T) {
-	if got := resolveName("  Build Box  "); got != "Build Box" {
-		t.Fatalf("resolveName = %q, want the trimmed configured name", got)
-	}
-	hostname, err := os.Hostname()
+// The agent name doubles as the state directory, so two names keep two
+// identities apart and a restart reuses the same one.
+func TestStateDirectoryIsNamedByAgent(t *testing.T) {
+	base := t.TempDir()
+	first, err := New(Config{Name: "box-a", StateBaseDir: base, AllowUnauthenticated: true, DisableDiscovery: true})
 	if err != nil {
-		t.Skip("host name is unavailable")
+		t.Fatal(err)
 	}
-	want := strings.TrimSuffix(hostname, ".local")
-	if index := strings.IndexByte(want, '.'); index > 0 {
-		want = want[:index]
+	keyPath := filepath.Join(base, "box-a", "identity.key")
+	info, err := os.Stat(keyPath)
+	if err != nil {
+		t.Fatalf("state key %s: %v", keyPath, err)
 	}
-	if got := resolveName(""); got != want {
-		t.Fatalf("resolveName(empty) = %q, want the host name %q", got, want)
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("key permissions = %o, want 600", info.Mode().Perm())
+	}
+	second, err := New(Config{Name: "box-b", StateBaseDir: base, AllowUnauthenticated: true, DisableDiscovery: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ID() == second.ID() {
+		t.Fatalf("two names share the identity %s", first.ID())
+	}
+	reopened, err := New(Config{Name: "box-a", StateBaseDir: base, AllowUnauthenticated: true, DisableDiscovery: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened.ID() != first.ID() {
+		t.Fatalf("restart changed the identity: %s -> %s", first.ID(), reopened.ID())
+	}
+	if _, err := New(Config{AllowUnauthenticated: true, DisableDiscovery: true, StateBaseDir: base}); err == nil {
+		t.Fatal("an agent without a name must be refused")
+	}
+}
+
+func TestNormalizeAgentName(t *testing.T) {
+	if got, err := normalizeName("  Build Box  "); err != nil || got != "Build Box" {
+		t.Fatalf("normalizeName = %q, %v; want the trimmed name", got, err)
+	}
+	for _, invalid := range []string{"", "   ", ".", "..", "a/b", `a\b`} {
+		if _, err := normalizeName(invalid); err == nil {
+			t.Errorf("normalizeName(%q) accepted an unusable name", invalid)
+		}
 	}
 	cases := map[string]string{
 		"Build Box":     "build-box",
@@ -367,7 +399,8 @@ func TestAgentRejectsIdleConnectionWithoutStream(t *testing.T) {
 	}
 	server, err := New(Config{
 		ListenAddress:    fmt.Sprintf("127.0.0.1:%d", port),
-		StateDir:         t.TempDir(),
+		Name:             "test-agent",
+		StateBaseDir:     t.TempDir(),
 		TrustedClientKey: publicKey,
 		DisableDiscovery: true,
 	})
@@ -421,7 +454,8 @@ func TestAgentResetsStreamWithTruncatedFirstFrame(t *testing.T) {
 	}
 	server, err := New(Config{
 		ListenAddress:    fmt.Sprintf("127.0.0.1:%d", port),
-		StateDir:         t.TempDir(),
+		Name:             "test-agent",
+		StateBaseDir:     t.TempDir(),
 		TrustedClientKey: publicKey,
 		DisableDiscovery: true,
 	})
@@ -487,7 +521,8 @@ func TestAgentAcceptsQueuedRequestAfterStreamSlotFrees(t *testing.T) {
 	}
 	server, err := New(Config{
 		ListenAddress:        fmt.Sprintf("127.0.0.1:%d", port),
-		StateDir:             t.TempDir(),
+		Name:                 "test-agent",
+		StateBaseDir:         t.TempDir(),
 		TrustedClientKey:     publicKey,
 		DisableDiscovery:     true,
 		MaxConcurrentStreams: 1,
@@ -579,7 +614,8 @@ func TestAgentRejectsRequestWhenRunSlotsStayBusy(t *testing.T) {
 	}
 	server, err := New(Config{
 		ListenAddress:        fmt.Sprintf("127.0.0.1:%d", port),
-		StateDir:             t.TempDir(),
+		Name:                 "test-agent",
+		StateBaseDir:         t.TempDir(),
 		TrustedClientKey:     publicKey,
 		DisableDiscovery:     true,
 		MaxConcurrentRuns:    1,
@@ -646,7 +682,8 @@ func TestAgentRejectsStreamFromSecondConnectionWhenSaturated(t *testing.T) {
 	}
 	server, err := New(Config{
 		ListenAddress:        fmt.Sprintf("127.0.0.1:%d", port),
-		StateDir:             t.TempDir(),
+		Name:                 "test-agent",
+		StateBaseDir:         t.TempDir(),
 		TrustedClientKey:     publicKey,
 		DisableDiscovery:     true,
 		MaxConcurrentStreams: 1,
@@ -723,7 +760,8 @@ func TestAgentStillShutsDownAfterAbandonedStream(t *testing.T) {
 	}
 	server, err := New(Config{
 		ListenAddress:        fmt.Sprintf("127.0.0.1:%d", port),
-		StateDir:             t.TempDir(),
+		Name:                 "test-agent",
+		StateBaseDir:         t.TempDir(),
 		TrustedClientKey:     publicKey,
 		DisableDiscovery:     true,
 		MaxConcurrentStreams: 1,
@@ -837,7 +875,7 @@ func TestAgentLogsRunStartAndResult(t *testing.T) {
 	server, err := New(Config{
 		Name:             "log-probe",
 		ListenAddress:    fmt.Sprintf("127.0.0.1:%d", port),
-		StateDir:         t.TempDir(),
+		StateBaseDir:     t.TempDir(),
 		TrustedClientKey: publicKey,
 		DisableDiscovery: true,
 	})

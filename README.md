@@ -20,15 +20,15 @@
 make keygen    # 生成 keys/client.key（0600）与 keys/client-key-info
 make build     # 构建 dist/remote-shell-{darwin-arm64,linux-amd64}，公钥编入二进制
 
-./dist/remote-shell-darwin-arm64 serve --name build-box   # 默认 UDP :42424 + mDNS
+./dist/remote-shell-darwin-arm64 serve --name build-box   # --name 必填；默认 UDP :42424 + mDNS
 ./dist/remote-shell-darwin-arm64 mcp                     # stdio；加 --listen 127.0.0.1:8765 即切到 HTTP（/mcp）
 ```
 
 容器里跑：bridge 网络不转发多播，mDNS 发现不到局域网，用 `--node host.docker.internal:42424` 或让容器共享 host 网络；按架构选 `dist/remote-shell-linux-arm64`（Apple Silicon 容器）或 `linux-amd64`。桥接跑在宿主机、MCP 客户端在容器里（`http://host.docker.internal:<port>/mcp`）可直接用：Host 头不做限制，因为浏览器发不出这种 Content-Type（预检 405、简单请求 415），真正的门禁是可选的 `--auth-token`。
 
-反过来也成立——`serve` 跑在容器里、宿主机 `mcp` 连过去：发布 UDP 端口（`-p 42425:42424/udp`）后用 `--node 127.0.0.1:42425`，容器镜像需自带 bash/fish/zsh，并挂载 `--state-dir` 保住 node ID。
+反过来也成立——`serve` 跑在容器里、宿主机 `mcp` 连过去：发布 UDP 端口（`-p 42425:42424/udp`）后用 `--node 127.0.0.1:42425`，容器镜像需自带 bash/fish/zsh，并把 `~/.config/remote-shell` 挂成卷以保住 node ID。
 
-Agent 首次启动会在状态目录（macOS `~/Library/Application Support/remote-shell/`）生成并复用 `identity.key`；`node-…` 是它的公钥指纹。
+`--name` 必填：它既是广播的名字，也是状态目录名——身份保存在 `~/.config/remote-shell/<name>/identity.key`（0600），首次启动生成、之后复用，`node-…` 就是这把公钥的指纹。
 
 ## MCP 工具
 

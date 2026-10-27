@@ -26,13 +26,11 @@ type ServerIdentity struct {
 	Certificate tls.Certificate
 }
 
+// LoadOrCreateServer loads or creates the identity in stateDir, which the caller
+// derives from the agent name.
 func LoadOrCreateServer(stateDir string) (ServerIdentity, error) {
 	if stateDir == "" {
-		base, err := os.UserConfigDir()
-		if err != nil {
-			return ServerIdentity{}, fmt.Errorf("resolve config directory: %w", err)
-		}
-		stateDir = filepath.Join(base, "remote-shell")
+		return ServerIdentity{}, fmt.Errorf("state directory is required")
 	}
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return ServerIdentity{}, fmt.Errorf("create state directory: %w", err)

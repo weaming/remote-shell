@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,11 +42,13 @@ const (
 var EmbeddedTrustedClientPublicKeyHex string
 
 type Config struct {
-	// Name is the human-readable label for this agent, shown by discovery and
-	// accepted wherever a node is selected. Empty falls back to the host name.
-	Name                 string
+	// Name identifies this agent: it is advertised for discovery and it names
+	// the state directory, so two instances need two names.
+	Name string
+	// StateBaseDir holds one directory per agent name. Empty selects
+	// ~/.config/remote-shell; tests point it at a temporary directory.
+	StateBaseDir         string
 	ListenAddress        string
-	StateDir             string
 	TrustedClientKey     ed25519.PublicKey
 	AllowUnauthenticated bool
 	DisableDiscovery     bool
@@ -91,7 +94,15 @@ func New(config Config) (*Agent, error) {
 	if len(config.TrustedClientKey) == 0 && !config.AllowUnauthenticated {
 		return nil, fmt.Errorf("client authentication is not configured; set a trusted client key or explicitly allow unauthenticated clients")
 	}
-	serverIdentity, err := identity.LoadOrCreateServer(config.StateDir)
+	name, err := normalizeName(config.Name)
+	if err != nil {
+		return nil, err
+	}
+	stateDir, err := stateDirFor(config.StateBaseDir, name)
+	if err != nil {
+		return nil, err
+	}
+	serverIdentity, err := identity.LoadOrCreateServer(stateDir)
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +112,7 @@ func New(config Config) (*Agent, error) {
 	}
 	return &Agent{
 		config:   config,
-		name:     resolveName(config.Name),
+		name:     name,
 		identity: serverIdentity,
 		tls:      tlsConfig,
 		runs:     make(chan struct{}, config.MaxConcurrentRuns),
@@ -118,21 +129,46 @@ func (a *Agent) Name() string {
 	return a.name
 }
 
-// resolveName picks the label this agent advertises: the configured name, or the
-// host name so every agent has something readable to show.
-func resolveName(configured string) string {
-	if name := strings.TrimSpace(configured); name != "" {
-		return name
+// normalizeName validates the agent name. It doubles as a directory name, so
+// path separators and dot-only names are refused.
+func normalizeName(configured string) (string, error) {
+	name := strings.TrimSpace(configured)
+	if name == "" {
+		return "", fmt.Errorf("agent name is required: pass --name (it also names the state directory)")
 	}
-	hostname, err := os.Hostname()
+	if name == "." || name == ".." || strings.ContainsAny(name, "/\\\x00") {
+		return "", fmt.Errorf("agent name %q cannot be used as a directory name", name)
+	}
+	for _, char := range name {
+		if char < 0x20 || char == 0x7f {
+			return "", fmt.Errorf("agent name %q contains a control character", name)
+		}
+	}
+	return name, nil
+}
+
+// defaultStateBaseDir is where every agent keeps its identity.
+func defaultStateBaseDir() (string, error) {
+	home, err := os.UserHomeDir()
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("resolve home directory: %w", err)
 	}
-	hostname = strings.TrimSuffix(hostname, ".local")
-	if index := strings.IndexByte(hostname, '.'); index > 0 {
-		hostname = hostname[:index]
+	return filepath.Join(home, ".config", "remote-shell"), nil
+}
+
+// stateDirFor returns the per-agent state directory, creating the base.
+func stateDirFor(base, name string) (string, error) {
+	if base == "" {
+		resolved, err := defaultStateBaseDir()
+		if err != nil {
+			return "", err
+		}
+		base = resolved
 	}
-	return hostname
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		return "", fmt.Errorf("create state base directory: %w", err)
+	}
+	return filepath.Join(base, name), nil
 }
 
 // sanitizeName keeps an mDNS instance label readable and legal: lower-case

@@ -103,7 +103,7 @@ func TestResolveServeConfigReachesAgentValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveServeConfig must not validate limits: %v", err)
 	}
-	if _, err := agent.New(agent.Config{AllowUnauthenticated: true, DisableDiscovery: true, MaxConcurrentStreams: 99999, StateDir: t.TempDir()}); err == nil {
+	if _, err := agent.New(agent.Config{AllowUnauthenticated: true, DisableDiscovery: true, MaxConcurrentStreams: 99999, Name: "test-agent", StateBaseDir: t.TempDir()}); err == nil {
 		t.Fatal("expected the agent to reject an oversized stream limit")
 	}
 }
