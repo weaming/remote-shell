@@ -89,3 +89,4 @@ Agent 日志：一次运行的两行以 run ID 打头，`run=<id> event=start �
 - MCP 侧输出缓存有上限：超出 `--max-output-bytes` 的旧字节被丢弃，前台结果只能看到保留的尾部，需用 `shell_output` 分页读取剩余部分。
 - MCP 的 HTTP 传输默认只监听回环地址；监听非回环地址时应配置 `--auth-token`，否则同网段任何人都能提交命令。
 - 一次运行只有一条命令；多条命令由模型发起多次 `shell` 调用，桥接与 Agent 都不做命令编排。
+- 同一 `--state-dir` 启动的多个 Agent 共享同一 node ID（身份来自 `identity.key`），mDNS 里只能靠端口区分，按 ID 选择会命中不确定的那个；一台机器跑多个实例时给每个实例独立的 `--state-dir`。
