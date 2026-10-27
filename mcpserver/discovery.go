@@ -21,6 +21,7 @@ type cachedNode struct {
 	Name         string
 	Instance     string
 	Hostname     string
+	SystemHost   string
 	AuthRequired bool
 	Addresses    []string
 }
@@ -92,12 +93,23 @@ func (c *nodeCache) preferred(node cachedNode) []string {
 
 // isLocalHost reports whether an advertised host name belongs to this machine,
 // so the bridge can reach the agent over loopback instead of an interface.
-func isLocalHost(hostname string) bool {
+func isLocalHost(node cachedNode) bool {
 	local, err := os.Hostname()
 	if err != nil || local == "" {
 		return false
 	}
-	return shortHostName(hostname) == shortHostName(local)
+	// SystemHost is the machine's own name; Hostname is the per-agent mDNS
+	// record, which never matches.
+	candidates := []string{node.SystemHost}
+	if node.SystemHost == "" {
+		candidates = []string{node.Hostname}
+	}
+	for _, candidate := range candidates {
+		if candidate != "" && shortHostName(candidate) == shortHostName(local) {
+			return true
+		}
+	}
+	return false
 }
 
 // shortHostName normalises "Host.Local." and "host.example.com" to "host".
@@ -192,6 +204,7 @@ func (s *Server) browseNodesFor(ctx context.Context, wait time.Duration) ([]cach
 					Name:         node.Name,
 					Instance:     node.Instance,
 					Hostname:     node.Hostname,
+					SystemHost:   node.SystemHost,
 					AuthRequired: node.AuthRequired,
 				}
 				merged[node.ID] = entry

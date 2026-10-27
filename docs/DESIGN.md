@@ -58,7 +58,7 @@ Agent 为命令创建受管进程组/等效运行边界。取消、超时、断�
 ## 当前技术实现
 
 1. **语言与依赖**：Go；QUIC 使用 `github.com/quic-go/quic-go`，mDNS 使用 `github.com/grandcat/zeroconf`。
-2. **发现**：发布/发现 `_remote-shell._udp` DNS-SD 服务，TXT 公布协议版本、Agent 稳定 ID、人类可读名称 `name` 和是否要求客户端鉴权；实例名为 `RemoteShell-<名称>-<ID 后缀>`，名称经清洗（小写字母/数字/下划线/短横线），两个同名 Agent 仍靠 ID 后缀区分。发现信息不作为信任凭据。
+2. **发现**：发布/发现 `_remote-shell._udp` DNS-SD 服务，TXT 公布协议版本、Agent 稳定 ID、人类可读名称 `name` 和是否要求客户端鉴权；实例名与主机记录都用 `RemoteShell-<名称>-<ID 后缀>`（名称经清洗：小写字母/数字/下划线/短横线），因此两个同名 Agent 仍靠 ID 后缀区分，且**不会占用系统自己的 `xxx.local` 主机名**——用系统主机名注册会让 mDNSResponder 判定重名冲突，把本机 Bonjour 名改成 `xxx-2`；系统主机名改放在 TXT 的 `host=` 里，供客户端判断“同机”。发现信息不作为信任凭据。
    mDNS 注册失败（如容器内无多播）只记录日志并继续服务，不阻止 Agent 启动。
 3. **线协议**：ALPN 为 `remote-shell/1`。每帧为 1 字节类型 + 4 字节大端长度 + payload；控制消息用 JSON，最大 4 MiB；stdout/stderr 用二进制帧（1 字节流标识 + 原始字节）避免 Base64 膨胀。运行请求的 stdin 与其余控制字段同帧 JSON 传输，受同一 4 MiB 上限约束。请求使用 `timeout_ms`，省略/0 表示默认值。单次运行的 stream 首帧为运行请求（直接是 `CommandSpec`，只含一条命令；调用方身份取自 TLS 证书，帧内不带 client ID），Agent 随后先回一帧运行 ID，再回输出块与结束结果；客户端取消即关闭 stream 写方向。Agent 先读取首帧再占用全局 stream 配额；读首帧超时 5 秒，未打开运行流（stream）的连接 10 秒后关闭，最后一次运行结束后的空闲连接约 200 ms 后关闭。配额满时请求排队：stream 槽最多等 50 ms、run 槽最多等 100 ms，超时才返回错误帧。单连接获得的 QUIC stream 信用额度等于 stream 上限，因此 stream 槽排队只在多个连接之间发生。
 4. **输出顺序**：每次运行的所有输出帧走在同一条有序 QUIC stream 上，到达顺序即 Agent 的写出顺序；帧内只有 stdout/stderr 类型和原始字节，因此不需要额外的序号字段。该顺序代表 Agent 收集两个管道时的观察顺序，不承诺进程跨管道的绝对写入时序。

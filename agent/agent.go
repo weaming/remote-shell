@@ -261,23 +261,86 @@ func (a *Agent) advertise(address net.Addr) (*zeroconf.Server, error) {
 	if !ok {
 		return nil, fmt.Errorf("unexpected QUIC listen address %T", address)
 	}
-	// Keep the instance unique even when two agents share a name: the identity
-	// suffix is what distinguishes them, the name is what humans read.
-	instance := "RemoteShell-" + strings.TrimPrefix(a.identity.ID, "node-")
-	if label := sanitizeName(a.name); label != "" {
-		instance = "RemoteShell-" + label + "-" + strings.TrimPrefix(a.identity.ID, "node-")
+	instance, hostName, text := advertisement(a.name, a.identity.ID, udpAddress.Port, len(a.config.TrustedClientKey) != 0, systemHostName())
+	// A dedicated host record is what keeps the system's own Bonjour name out
+	// of this: publishing the machine's host name would collide with
+	// mDNSResponder, which then renames the host to "name-2" to recover.
+	addresses, err := publishableAddresses()
+	if err != nil {
+		return nil, err
 	}
-	text := []string{
-		"id=" + a.identity.ID,
-		"name=" + a.name,
-		"proto=" + protocol.Version,
-		"auth=" + strconv.FormatBool(len(a.config.TrustedClientKey) != 0),
-	}
-	server, err := zeroconf.Register(instance, protocol.ServiceType, "local.", udpAddress.Port, text, nil)
+	server, err := zeroconf.RegisterProxy(instance, protocol.ServiceType, "local.", udpAddress.Port, hostName, addresses, text, nil)
 	if err != nil {
 		return nil, fmt.Errorf("register mDNS service: %w", err)
 	}
 	return server, nil
+}
+
+// advertisement builds the names and TXT payload of a service announcement.
+// The instance and the host record both carry the identity suffix, so several
+// agents can announce on one machine without contending for a name; the system
+// host name travels in TXT for clients that want to know they are local.
+func advertisement(name, nodeID string, port int, authRequired bool, systemHost string) (instance, hostName string, text []string) {
+	suffix := strings.TrimPrefix(nodeID, "node-")
+	instance = "RemoteShell-" + suffix
+	if label := sanitizeName(name); label != "" {
+		instance = "RemoteShell-" + label + "-" + suffix
+	}
+	hostName = instance
+	_ = port
+	text = []string{
+		"id=" + nodeID,
+		"name=" + name,
+		"proto=" + protocol.Version,
+		"auth=" + strconv.FormatBool(authRequired),
+	}
+	if systemHost != "" {
+		text = append(text, "host="+systemHost)
+	}
+	return instance, hostName, text
+}
+
+// systemHostName is this machine's Bonjour-style host name, reported in TXT so a
+// client can tell a local agent from a remote one.
+func systemHostName() string {
+	name, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	return name
+}
+
+// publishableAddresses lists the unicast addresses to publish for the host
+// record, skipping loopback and interfaces without multicast.
+func publishableAddresses() ([]string, error) {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil, fmt.Errorf("list interfaces: %w", err)
+	}
+	addresses := make([]string, 0, 4)
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagMulticast == 0 {
+			continue
+		}
+		if iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		assigned, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range assigned {
+			ipNet, ok := addr.(*net.IPNet)
+			if !ok || ipNet.IP.IsLoopback() {
+				continue
+			}
+			addresses = append(addresses, ipNet.IP.String())
+		}
+	}
+	if len(addresses) == 0 {
+		return nil, fmt.Errorf("no multicast interface with an address to advertise")
+	}
+	return addresses, nil
 }
 
 func (a *Agent) handleConnection(serverCtx context.Context, connection *quic.Conn) {

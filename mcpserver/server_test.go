@@ -330,9 +330,10 @@ func TestTargetForPrefersLoopbackForLocalAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	local := bridge.targetFor(cachedNode{
-		ID:        "node-local",
-		Hostname:  hostname + ".local",
-		Addresses: []string{"192.168.0.3:42424"},
+		ID:         "node-local",
+		Hostname:   "RemoteShell-box-abc.local",
+		SystemHost: hostname + ".local",
+		Addresses:  []string{"192.168.0.3:42424"},
 	})
 	if len(local.addresses) < 3 || local.addresses[0] != "127.0.0.1:42424" {
 		t.Fatalf("addresses = %v, want loopback first", local.addresses)
@@ -342,9 +343,10 @@ func TestTargetForPrefersLoopbackForLocalAgent(t *testing.T) {
 	}
 
 	remote := bridge.targetFor(cachedNode{
-		ID:        "node-remote",
-		Hostname:  "some-other-host.local",
-		Addresses: []string{"192.168.0.9:42424"},
+		ID:         "node-remote",
+		Hostname:   "RemoteShell-other-def.local",
+		SystemHost: "some-other-host.local",
+		Addresses:  []string{"192.168.0.9:42424"},
 	})
 	if len(remote.addresses) != 1 || remote.addresses[0] != "192.168.0.9:42424" {
 		t.Fatalf("addresses = %v, want only the advertised address", remote.addresses)
@@ -355,7 +357,8 @@ func TestDescribeNodeViewIsKeyValue(t *testing.T) {
 	view := nodeView{
 		ID:           "node-a",
 		Name:         "Build Box",
-		Hostname:     "mini.local",
+		Host:         "mini.local",
+		Hostname:     "RemoteShell-build-box-abc.local",
 		AuthRequired: true,
 		Addresses:    []string{"10.0.0.1:42424", "10.0.0.2:42424", "10.0.0.3:42424", "10.0.0.4:42424", "10.0.0.5:42424"},
 	}

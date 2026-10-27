@@ -12,10 +12,13 @@ import (
 )
 
 type Node struct {
-	ID           string
-	Name         string
-	Protocol     string
+	ID       string
+	Name     string
+	Protocol string
+	// Hostname is the per-agent mDNS host record; SystemHost is the machine's
+	// own host name from TXT, which is what tells a client it is local.
 	Hostname     string
+	SystemHost   string
 	Instance     string
 	Addresses    []string
 	AuthRequired bool
@@ -100,6 +103,7 @@ func parseEntry(entry *zeroconf.ServiceEntry) (Node, bool) {
 		Name:         values["name"],
 		Protocol:     values["proto"],
 		Hostname:     strings.TrimSuffix(entry.HostName, "."),
+		SystemHost:   values["host"],
 		Instance:     entry.Instance,
 		AuthRequired: authRequired,
 	}

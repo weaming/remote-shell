@@ -288,6 +288,7 @@ type nodeView struct {
 	ID           string   `json:"id"`
 	Name         string   `json:"name,omitempty"`
 	Instance     string   `json:"instance,omitempty"`
+	Host         string   `json:"host,omitempty"`
 	Hostname     string   `json:"hostname,omitempty"`
 	Addresses    []string `json:"addresses"`
 	AuthRequired bool     `json:"auth_required"`
@@ -316,6 +317,7 @@ func (s *Server) discoverNodes(ctx context.Context, _ *mcp.CallToolRequest, inpu
 			ID:           node.ID,
 			Name:         node.Name,
 			Instance:     node.Instance,
+			Host:         node.SystemHost,
 			Hostname:     node.Hostname,
 			Addresses:    addresses,
 			AuthRequired: node.AuthRequired,
@@ -348,8 +350,8 @@ func describeNodeView(view nodeView) string {
 	if view.Name != "" {
 		line += " name=" + logValue(view.Name)
 	}
-	if view.Hostname != "" {
-		line += " host=" + view.Hostname
+	if view.Host != "" {
+		line += " host=" + view.Host
 	}
 	line += fmt.Sprintf(" auth=%t addrs=%s", view.AuthRequired, strings.Join(shown, ","))
 	if len(view.Addresses) > len(shown) {
@@ -755,7 +757,7 @@ func (s *Server) targetFor(node cachedNode) dialTarget {
 	addresses := preferAddresses(s.discovery.preferred(node))
 	// A local agent is reachable over loopback: no interface needs to be up and
 	// no incoming-connection prompt fires for 127.0.0.1.
-	if isLocalHost(node.Hostname) {
+	if isLocalHost(node) {
 		addresses = append(loopbackCandidates(node), addresses...)
 	}
 	return dialTarget{
