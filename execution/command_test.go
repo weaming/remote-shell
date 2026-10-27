@@ -3,6 +3,7 @@ package execution
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -291,5 +292,44 @@ func TestOutputFailureCancelsCommand(t *testing.T) {
 	}
 	if !strings.Contains(result.Error, "client disconnected") {
 		t.Fatalf("missing output forwarding error: %+v", result)
+	}
+}
+
+func TestRunExpandsHomeInCWD(t *testing.T) {
+	if _, err := shellCommand(ShellBash, "true"); err != nil {
+		t.Skip("bash is not installed")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		t.Skip("no home directory")
+	}
+	var output strings.Builder
+	result, err := Run(context.Background(), "run-home", Command{
+		Shell:  ShellBash,
+		Script: "pwd",
+		CWD:    "~/",
+	}, func(_ context.Context, chunk Output) error {
+		output.Write(chunk.Data)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("exit code = %d, want 0", result.ExitCode)
+	}
+	if got := strings.TrimSpace(output.String()); got != home {
+		t.Fatalf("pwd = %q, want the agent home %q", got, home)
+	}
+}
+
+func TestRunRejectsRelativeCWD(t *testing.T) {
+	_, err := Run(context.Background(), "run-relative", Command{
+		Shell:  ShellBash,
+		Script: "true",
+		CWD:    "tmp",
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "absolute") {
+		t.Fatalf("err = %v, want a rejection of the relative cwd", err)
 	}
 }

@@ -270,6 +270,7 @@ type discoverNodesInput struct {
 
 type nodeView struct {
 	ID           string   `json:"id"`
+	Name         string   `json:"name,omitempty"`
 	Instance     string   `json:"instance,omitempty"`
 	Hostname     string   `json:"hostname,omitempty"`
 	Addresses    []string `json:"addresses"`
@@ -297,6 +298,7 @@ func (s *Server) discoverNodes(ctx context.Context, _ *mcp.CallToolRequest, inpu
 		addresses := preferAddresses(node.Addresses)
 		views = append(views, nodeView{
 			ID:           node.ID,
+			Name:         node.Name,
 			Instance:     node.Instance,
 			Hostname:     node.Hostname,
 			Addresses:    addresses,
@@ -315,7 +317,7 @@ func (s *Server) discoverNodes(ctx context.Context, _ *mcp.CallToolRequest, inpu
 			shown = shown[:maxShownAddresses]
 		}
 		lines = append(lines, fmt.Sprintf("%s auth=%t %s %s",
-			view.ID, view.AuthRequired, strings.Join(shown, ",")+suffix, view.Hostname))
+			labelOfNodeView(view), view.AuthRequired, strings.Join(shown, ",")+suffix, view.Hostname))
 	}
 	text := "no agent announced itself; pass an explicit host:port as node"
 	if len(lines) > 0 {
@@ -325,8 +327,16 @@ func (s *Server) discoverNodes(ctx context.Context, _ *mcp.CallToolRequest, inpu
 		discoverNodesOutput{Nodes: views, WaitedMS: wait.Milliseconds()}, nil
 }
 
+// labelOfNodeView prefers the announced name over the node ID.
+func labelOfNodeView(view nodeView) string {
+	if view.Name != "" {
+		return view.Name + " " + view.ID
+	}
+	return view.ID
+}
+
 type nodeInput struct {
-	Node string `json:"node,omitempty" jsonschema:"agent address host:port, host name, or a node ID; when omitted the bridge uses --node, otherwise the only agent it discovered on the local network"`
+	Node string `json:"node,omitempty" jsonschema:"agent address host:port, its --name, its host name, or a node ID; when omitted the bridge uses --node, otherwise the only agent it discovered on the local network"`
 }
 
 type listShellsOutput struct {
@@ -358,10 +368,10 @@ func (s *Server) listShells(ctx context.Context, _ *mcp.CallToolRequest, input n
 }
 
 type shellInput struct {
-	Node       string            `json:"node,omitempty" jsonschema:"agent address host:port, host name, or a node ID; when omitted the bridge uses --node, otherwise the only agent it discovered on the local network"`
+	Node       string            `json:"node,omitempty" jsonschema:"agent address host:port, its --name, its host name, or a node ID; when omitted the bridge uses --node, otherwise the only agent it discovered on the local network"`
 	Shell      string            `json:"shell" jsonschema:"shell that runs the script: bash, fish or zsh; use list_shells to see what the agent has"`
 	Script     string            `json:"script" jsonschema:"script text passed to the shell with -c"`
-	CWD        string            `json:"cwd" jsonschema:"absolute working directory on the agent host"`
+	CWD        string            `json:"cwd" jsonschema:"working directory on the agent host: an absolute path, or ~ / ~/sub to use the agent user's home"`
 	Env        map[string]string `json:"env,omitempty" jsonschema:"extra environment variables for the command"`
 	Stdin      string            `json:"stdin,omitempty" jsonschema:"text written to the command's stdin"`
 	TimeoutMS  int64             `json:"timeout_ms,omitempty" jsonschema:"command timeout in milliseconds; 0 uses the agent default of 300000, maximum 3600000"`
@@ -393,8 +403,9 @@ func (s *Server) runShell(ctx context.Context, _ *mcp.CallToolRequest, input she
 	if cwd == "" {
 		return nil, shellRunOutput{}, fmt.Errorf("cwd is required")
 	}
-	if !filepath.IsAbs(cwd) {
-		return nil, shellRunOutput{}, fmt.Errorf("cwd must be an absolute path")
+	// "~" and "~/…" are expanded by the agent, against its own user's home.
+	if !filepath.IsAbs(cwd) && cwd != "~" && !strings.HasPrefix(cwd, "~/") {
+		return nil, shellRunOutput{}, fmt.Errorf("cwd must be an absolute path or start with ~")
 	}
 	timeout := time.Duration(input.TimeoutMS) * time.Millisecond
 	if input.TimeoutMS < 0 || timeout > execution.MaxTimeout {
@@ -725,8 +736,14 @@ func (s *Server) targetFor(node cachedNode) dialTarget {
 }
 
 func matchNode(nodes []cachedNode, selector string) (cachedNode, bool) {
+	selector = strings.TrimSuffix(selector, ".")
 	for _, node := range nodes {
-		if node.ID == selector || strings.EqualFold(strings.TrimSuffix(node.Hostname, "."), selector) {
+		switch {
+		case node.ID == selector:
+			return node, true
+		case node.Name != "" && strings.EqualFold(node.Name, selector):
+			return node, true
+		case strings.EqualFold(strings.TrimSuffix(node.Hostname, "."), selector):
 			return node, true
 		}
 	}

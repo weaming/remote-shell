@@ -2,7 +2,7 @@
 
 ## 目标
 
-实现一个轻量的远程脚本执行引擎，优先考虑 Go 或 Rust，运行环境覆盖 Unix/macOS 宿主机与容器。第一阶段聚焦局域网；执行端 Agent 尽量免配置、可靠稳定，客户端负责任务发起、输出查看和个性化处理。当前仓库实现 Go Agent 核心、QUIC 服务、mDNS 发布/发现和通用线协议；客户端 UI、peek 缓存与个性化处理由另一个客户端实现。
+实现一个轻量的远程脚本执行引擎，优先考虑 Go 或 Rust，运行环境覆盖 Unix/macOS 宿主机与容器。第一阶段聚焦局域网；执行端 Agent 尽量免配置、可靠稳定，客户端负责发起运行、查看输出和个性化处理。当前仓库实现 Go Agent 核心、QUIC 服务、mDNS 发布/发现和通用线协议；客户端 UI、peek 缓存与个性化处理由另一个客户端实现。
 
 ## 原始需求
 
@@ -13,11 +13,11 @@
 - 远程执行完整命令字符串，shell 由执行器指定并解析。
 - 支持 stdout、stderr 分别查看，也支持按输出观察顺序混合查看。
 - 支持多次运行并发；每次运行彼此独立，且一次运行只包含一条 shell 命令。
-- 每条命令都必须指定工作目录，并可指定环境变量、stdin 和超时。运行 ID 由 Agent 生成并下发，客户端后续查询/取消都用该 ID。
+- 每条命令都必须指定工作目录，并可指定环境变量、stdin 和超时。运行 ID 由 Agent 生成并下发（24 位小写十六进制，96 bit 随机，无前缀），客户端后续查询/取消都用该 ID。
 - 超时默认 5 分钟，最大 1 小时；支持取消，并返回退出码。
-- 支持在任务结束前查看当前状态和已有输出（peek）。peek 与输出展示由客户端实现。
+- 支持在运行结束前查看当前状态和已有输出（peek）。peek 与输出展示由客户端实现。
 - 不设 Agent 侧输出量上限；脚本/客户端自行用 tail、grep 等方式控制输出。Agent 负责连接和执行，客户端负责缓存、处理和定制。
-- 不缓存断线后的结果。默认断线即终止任务。
+- 不缓存断线后的结果。默认断线即终止运行。
 - 正常结束、非零退出、取消或超时后，清理命令及其受管后代：先终止，等待最多 10 秒，再强杀。
 - 不增加外部进程监督；Agent 被强杀或后代脱离受管进程组后遗留进程，接受不处理。
 
@@ -31,7 +31,7 @@
 
 ### 通信与运行模型
 
-Agent 使用 QUIC + TLS 1.3。一个连接可复用多个双向 stream；每次运行独立使用一个 stream，同一客户端可并发提交多次运行。一次运行就是一条 shell 命令，不存在任务级多命令编排——需要多条命令时由调用方自行发起多次运行。运行结束后关闭对应 stream；最后一个活动 stream 结束后，Agent 等待约 200 ms 并关闭连接。新连接若 10 秒内未打开 stream 也会关闭；活动命令期间有 QUIC keepalive 支持长时间无输出的运行。
+Agent 使用 QUIC + TLS 1.3。一个连接可复用多个双向 stream；每次运行独立使用一个 stream，同一客户端可并发提交多次运行。一次运行就是一条 shell 命令，不存在多命令编排——需要多条命令时由调用方自行发起多次运行。运行结束后关闭对应 stream；最后一个活动 stream 结束后，Agent 等待约 200 ms 并关闭连接。新连接若 10 秒内未打开 stream 也会关闭；活动命令期间有 QUIC keepalive 支持长时间无输出的运行。
 
 stdout 与 stderr 分开采集和传输。每个输出块携带流类型和递增序号，客户端可按流查看，或按 Agent 观察到的序号合并。两个 OS 管道不能提供进程层面的全局真实写入顺序，因此混合顺序的定义是 Agent 采集观察顺序。
 
@@ -39,7 +39,7 @@ Agent 不缓存断线后的输出；输出实时流式发送，使用有界内�
 
 ### 身份与鉴权
 
-Agent 可选验证客户端身份：Agent 二进制内嵌一个 Ed25519 客户端公钥；客户端用对应私钥生成 TLS 客户端证书。Agent 在 TLS 校验公钥，并在任务请求中校验 `client_id` 等于该公钥 SHA-256 指纹。客户端私钥由 `keygen` 命令生成并以仅用户可读权限保存；私钥不编入二进制。鉴权默认关闭必须显式传 `--allow-unauthenticated`；启用鉴权时通过构建参数嵌入公钥。
+Agent 可选验证客户端身份：Agent 二进制内嵌一个 Ed25519 客户端公钥；客户端用对应私钥生成 TLS 客户端证书。Agent 在 TLS 校验公钥，并在运行请求中校验 `client_id` 等于该公钥 SHA-256 指纹。客户端私钥由 `keygen` 命令生成并以仅用户可读权限保存；私钥不编入二进制。鉴权默认关闭必须显式传 `--allow-unauthenticated`；启用鉴权时通过构建参数嵌入公钥。
 
 Agent 首次运行自动生成并持久化服务端 Ed25519 身份，ID 是公钥指纹，并通过 mDNS 公布。按用户明确选择，客户端**不验证执行端证书/身份**。因此客户端到 Agent 的 TLS 连接并不具备对端认证：恶意假 Agent 或中间人仍可能诱骗客户端提交命令、读取命令内容或伪造响应。客户端公钥认证只限制谁能让真实 Agent 执行命令，不能替代客户端验证服务端身份；这是已接受的安全限制，不应宣称完整防 MITM。
 
@@ -47,7 +47,7 @@ Agent 首次运行自动生成并持久化服务端 Ed25519 身份，ID 是公�
 
 仅支持 bash、fish、zsh；执行端只公布本机确实可用的 shell。请求必须明确指定 shell 和完整命令字符串，不根据启动 Agent 的默认 shell 猜测。不同 shell 语法不兼容，客户端需要按指定 shell 组织命令。
 
-每条命令单独具有必填 cwd、环境变量、stdin 和超时；shell 只能是本机实际存在的 bash、fish 或 zsh。环境变量基于 Agent 进程环境合并覆盖。超时省略或为 0 时按 5 分钟处理，最大 1 小时。运行结果只描述这一条命令。
+每条命令单独具有必填 cwd、环境变量、stdin 和超时；cwd 必须是绝对路径，或以 `~` / `~/子路径` 开头（由 Agent 按其自身用户的家目录展开，相对路径一律拒绝）；shell 只能是本机实际存在的 bash、fish 或 zsh。环境变量基于 Agent 进程环境合并覆盖。超时省略或为 0 时按 5 分钟处理，最大 1 小时。运行结果只描述这一条命令。
 
 ### 进程清理
 
@@ -58,14 +58,14 @@ Agent 为命令创建受管进程组/等效运行边界。取消、超时、断�
 ## 当前技术实现
 
 1. **语言与依赖**：Go；QUIC 使用 `github.com/quic-go/quic-go`，mDNS 使用 `github.com/grandcat/zeroconf`。
-2. **发现**：发布/发现 `_remote-shell._udp` DNS-SD 服务，TXT 公布协议版本、Agent 稳定 ID 和是否要求客户端鉴权。发现信息不作为信任凭据。
+2. **发现**：发布/发现 `_remote-shell._udp` DNS-SD 服务，TXT 公布协议版本、Agent 稳定 ID、人类可读名称 `name` 和是否要求客户端鉴权；实例名为 `RemoteShell-<名称>-<ID 后缀>`，名称经清洗（小写字母/数字/下划线/短横线），两个同名 Agent 仍靠 ID 后缀区分。发现信息不作为信任凭据。
    mDNS 注册失败（如容器内无多播）只记录日志并继续服务，不阻止 Agent 启动。
 3. **线协议**：ALPN 为 `remote-shell/1`。每帧为 1 字节类型 + 4 字节大端长度 + payload；控制消息用 JSON，最大 4 MiB；stdout/stderr 用二进制帧避免 Base64 膨胀。运行请求的 stdin 与其余控制字段同帧 JSON 传输，受同一 4 MiB 上限约束。请求使用 `timeout_ms`，省略/0 表示默认值。单次运行的 stream 首帧为运行请求（只含一条命令），Agent 随后先回一帧运行 ID，再回输出块与结束结果；客户端取消即关闭 stream 写方向。Agent 先读取首帧再占用全局 stream 配额；读首帧超时 5 秒，未打开运行流（stream）的连接 10 秒后关闭，最后一次运行结束后的空闲连接约 200 ms 后关闭。配额满时请求排队：stream 槽最多等 50 ms、run 槽最多等 100 ms，超时才返回错误帧。单连接获得的 QUIC stream 信用额度等于 stream 上限，因此 stream 槽排队只在多个连接之间发生。
 4. **输出排序**：输出帧包含运行内递增 `seq`、stdout/stderr 类型和原始字节。该序号代表 Agent 收集两个管道时的观察顺序，不承诺进程跨管道的绝对写入时序。
 5. **调度限制**：默认最多 64 个并发运行、128 个并发 stream；serve 参数（`--max-runs`/`--max-streams`）可调整，硬上限分别为 1024 和 4096。建议保持 stream 上限大于 run 上限：等待 run 槽的请求会短暂占用 stream 槽，两者接近时更容易触发 50 ms 排队超时。命令输出实时转发，单块约 32 KiB，不累计缓存；下游慢时依靠管道和 QUIC 流控形成背压。
 6. **鉴权与身份**：使用 `make keygen`（即 `scripts/build.fish keygen`）生成客户端密钥，默认保存到 `keys/client.key`（权限 `0600`，由 `.gitignore` 排除），同时将公钥记录在 `keys/client-key-info`。`make build` 生成 macOS arm64 与 Linux amd64 两个最小化构建，并将该公钥编入二进制；构建前会用 `remote-shell pubkey` 校验私钥与记录的公钥一致，不一致直接失败。客户端私钥可通过 `identity.LoadClientPrivateKey` 读取。Agent 的服务端身份自动生成并稳定保存，但客户端不验证它。
 7. **清理**：每条命令放入独立进程组。取消或超时后先 TERM，等待最多 10 秒，再 KILL。shell 自身退出（含非零退出）后，若组内仍有后代，立即 TERM，最多等 5 秒输出排空后 KILL，避免正常结束的运行被后台进程拖住 10 秒；超时仍未排空则关闭 agent 自身读端，保证运行不会永久卡住。Agent 退出时关闭连接并等待受管运行清理。无外部 supervisor；Agent 被 SIGKILL 或后代脱离进程组造成的残留已接受。
-8. **运行**：`remote-shell serve` 启动执行端；鉴权关闭需显式 `--allow-unauthenticated`。默认 mDNS 广播，也可用 `--no-discovery` 关闭。根命令和子命令均支持 `-h`、`--help`。构建逻辑在 `scripts/build.fish`：`GO`、`CGO_ENABLED`、`GOFLAGS`、`LDFLAGS`、`KEY_DIR`、`OUT_DIR` 通过环境变量共享，Makefile 只是转发这几个变量的薄封装。
+8. **运行**：`remote-shell serve` 启动执行端，`--name` 指定人类可读名称（缺省取主机名短名），会出现在启动日志、mDNS TXT/实例名和发现的节点列表里，也可直接作为 MCP 的 `node` 选择器（大小写不敏感）；鉴权关闭需显式 `--allow-unauthenticated`。默认 mDNS 广播，也可用 `--no-discovery` 关闭。根命令和子命令均支持 `-h`、`--help`。构建逻辑在 `scripts/build.fish`：`GO`、`CGO_ENABLED`、`GOFLAGS`、`LDFLAGS`、`KEY_DIR`、`OUT_DIR` 通过环境变量共享，Makefile 只是转发这几个变量的薄封装。
 9. **MCP 桥接**：`remote-shell mcp` 把执行端暴露为 MCP 工具，支持 `--transport stdio`（默认）与 `--transport http`（streamable HTTP，端点 `/mcp`，默认只绑 `127.0.0.1:8765`，可用 `--auth-token` 要求 Bearer）。工具集：`discover_nodes`（mDNS 列节点）、`list_shells`（Agent 上可用的 shell）、`shell`（跑一条命令，可 `background`）、`shell_status`、`shell_output`（按 `all`/`stdout`/`stderr` 视图分页读取）、`shell_cancel`、`list_runs`。运行 ID 由 Agent 生成并作为唯一查询键，桥接不再虚构第二套 ID。每次 `shell` 单独拨一条 QUIC 连接，不连接池复用；运行结束或取消后连接即关闭，Agent 侧按断线语义清理。输出在桥接进程内按到达顺序缓存，超过 `--max-output-bytes`（默认 8 MiB）时丢弃最旧字节并用 `trimmed_bytes`/`next_offset` 如实报告；前台调用返回全部保留输出，后台运行通过 `shell_status`/`shell_output` 轮询。stdio 模式下日志只走 stderr，stdout 保持纯协议通道；`--node` 为默认目标，缺省时可用 `node` 参数传 `host:port` 或 `discover_nodes` 得到的节点 ID。非零退出码按正常结果返回，只有传输失败、取消、超时才标记为工具错误。
 未给 `node` 且没有 `--node` 时，桥接自动使用 mDNS 发现的唯一 Agent。发现结果一经找到就缓存，不按时间过期；只有连接失败时才丢弃缓存并重新搜索、重试一次，找到/丢弃都会记一行日志。每个节点还会记住上次连通的地址并优先尝试；发现到多个 Agent 时报错并列出候选，不做猜测。
 支持的协议版本限定为 `2026-07-28` 与 `2025-11-25`（`ServerOptions.SupportedProtocolVersions`），更旧的版本一律拒绝，避免在未验证的语义下运行。

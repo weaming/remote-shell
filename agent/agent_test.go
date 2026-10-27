@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -16,7 +17,7 @@ import (
 	"remote-shell/protocol"
 )
 
-func TestAgentStreamsAuthenticatedTask(t *testing.T) {
+func TestAgentStreamsAuthenticatedRun(t *testing.T) {
 	if !containsShell(execution.AvailableShells(), execution.ShellBash) {
 		t.Skip("bash is not installed")
 	}
@@ -327,6 +328,35 @@ func TestAgentAllowsExplicitUnauthenticatedMode(t *testing.T) {
 	_ = connection.CloseWithError(0, "test complete")
 }
 
+func TestResolveAndSanitizeAgentName(t *testing.T) {
+	if got := resolveName("  Build Box  "); got != "Build Box" {
+		t.Fatalf("resolveName = %q, want the trimmed configured name", got)
+	}
+	hostname, err := os.Hostname()
+	if err != nil {
+		t.Skip("host name is unavailable")
+	}
+	want := strings.TrimSuffix(hostname, ".local")
+	if index := strings.IndexByte(want, '.'); index > 0 {
+		want = want[:index]
+	}
+	if got := resolveName(""); got != want {
+		t.Fatalf("resolveName(empty) = %q, want the host name %q", got, want)
+	}
+	cases := map[string]string{
+		"Build Box":     "build-box",
+		"mini_garden":   "mini_garden",
+		"  a//b  ":      "a-b",
+		"中文名字":          "",
+		"already-fine-": "already-fine",
+	}
+	for input, expected := range cases {
+		if got := sanitizeName(input); got != expected {
+			t.Errorf("sanitizeName(%q) = %q, want %q", input, got, expected)
+		}
+	}
+}
+
 func TestAgentRequiresTrustedClientKey(t *testing.T) {
 	if _, err := New(Config{DisableDiscovery: true}); err == nil {
 		t.Fatal("expected authentication configuration error")
@@ -554,7 +584,7 @@ func TestAgentAcceptsQueuedRequestAfterStreamSlotFrees(t *testing.T) {
 	}
 }
 
-func TestAgentRejectsRequestWhenTaskSlotsStayBusy(t *testing.T) {
+func TestAgentRejectsRequestWhenRunSlotsStayBusy(t *testing.T) {
 	if !containsShell(execution.AvailableShells(), execution.ShellBash) {
 		t.Skip("bash is not installed")
 	}
@@ -866,7 +896,7 @@ func TestAgentLogsRequestStartAndResultWithSharedID(t *testing.T) {
 	defer connection.CloseWithError(0, "test complete")
 
 	// One successful run, one failing run, and one shell-list request.
-	runTask := func(id, script string) {
+	runShell := func(id, script string) {
 		stream, err := connection.OpenStreamSync(context.Background())
 		if err != nil {
 			t.Fatal(err)
@@ -900,8 +930,8 @@ func TestAgentLogsRequestStartAndResultWithSharedID(t *testing.T) {
 			}
 		}
 	}
-	runTask("logged-ok", "printf hello")
-	runTask("logged-fail", "printf boom >&2; exit 4")
+	runShell("logged-ok", "printf hello")
+	runShell("logged-fail", "printf boom >&2; exit 4")
 
 	stream, err := connection.OpenStreamSync(context.Background())
 	if err != nil {
@@ -933,7 +963,7 @@ func TestAgentLogsRequestStartAndResultWithSharedID(t *testing.T) {
 			t.Fatalf("result req=%s has no duration:\n%s", id, captured.String())
 		}
 		counts[fields["state"]]++
-		if starts[id]["kind"] == "shell" && !strings.HasPrefix(starts[id]["run"], "sh-") {
+		if starts[id]["kind"] == "shell" && !isRunID(starts[id]["run"]) {
 			t.Fatalf("req=%s did not log the agent-assigned run ID: %v", id, starts[id])
 		}
 	}
@@ -943,6 +973,20 @@ func TestAgentLogsRequestStartAndResultWithSharedID(t *testing.T) {
 	if !strings.Contains(captured.String(), "exit=4") {
 		t.Fatalf("failing run did not log its exit code:\n%s", captured.String())
 	}
+}
+
+// isRunID reports whether value looks like an agent-assigned run ID: 24 lower-case
+// hex characters, 96 bits of randomness.
+func isRunID(value string) bool {
+	if len(value) != 24 {
+		return false
+	}
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // parseRequestLogs indexes start and result lines by request ID.

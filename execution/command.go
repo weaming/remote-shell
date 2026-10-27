@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -124,6 +125,10 @@ func (c Command) normalize() (Command, error) {
 	if strings.TrimSpace(command.CWD) == "" {
 		return Command{}, fmt.Errorf("cwd is required")
 	}
+	command.CWD = expandHome(command.CWD)
+	if !filepath.IsAbs(command.CWD) {
+		return Command{}, fmt.Errorf("cwd must be an absolute path or start with ~")
+	}
 	if command.Shell != ShellBash && command.Shell != ShellFish && command.Shell != ShellZsh {
 		return Command{}, fmt.Errorf("unsupported shell %q", command.Shell)
 	}
@@ -146,6 +151,22 @@ func (c Command) normalize() (Command, error) {
 		return Command{}, fmt.Errorf("cwd is not a directory")
 	}
 	return command, nil
+}
+
+// expandHome turns "~" and "~/…" into the agent user's home directory. Only the
+// leading form is expanded, so a literal "~" inside a path is left alone.
+func expandHome(path string) string {
+	if path != "~" && !strings.HasPrefix(path, "~/") {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return path
+	}
+	if path == "~" {
+		return home
+	}
+	return filepath.Join(home, path[2:])
 }
 
 func mergedEnvironment(overrides map[string]string) []string {

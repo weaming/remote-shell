@@ -13,6 +13,7 @@ import (
 
 type Node struct {
 	ID           string
+	Name         string
 	Protocol     string
 	Hostname     string
 	Instance     string
@@ -90,12 +91,13 @@ func parseEntry(entry *zeroconf.ServiceEntry) (Node, bool) {
 	for _, item := range entry.Text {
 		key, value, ok := strings.Cut(item, "=")
 		if ok {
-			values[key] = value
+			values[key] = unescapeTXT(value)
 		}
 	}
 	authRequired, _ := strconv.ParseBool(values["auth"])
 	node := Node{
 		ID:           values["id"],
+		Name:         values["name"],
 		Protocol:     values["proto"],
 		Hostname:     strings.TrimSuffix(entry.HostName, "."),
 		Instance:     entry.Instance,
@@ -108,4 +110,35 @@ func parseEntry(entry *zeroconf.ServiceEntry) (Node, bool) {
 		node.Addresses = append(node.Addresses, net.JoinHostPort(address.String(), strconv.Itoa(entry.Port)))
 	}
 	return node, node.ID != "" && len(node.Addresses) > 0
+}
+
+// unescapeTXT decodes the DNS presentation escapes a TXT value can carry.
+// Advertisers publish plain UTF-8, but a TXT record stores raw bytes and the
+// resolver hands them back escaped, so a Chinese name arrives as "\229\174\191".
+func unescapeTXT(value string) string {
+	if !strings.ContainsRune(value, '\\') {
+		return value
+	}
+	decoded := make([]byte, 0, len(value))
+	for index := 0; index < len(value); index++ {
+		char := value[index]
+		if char != '\\' || index+1 >= len(value) {
+			decoded = append(decoded, char)
+			continue
+		}
+		// DNS escapes are three decimal digits, \229 for byte 0xE5.
+		if index+3 < len(value) && isDecimalDigit(value[index+1]) && isDecimalDigit(value[index+2]) && isDecimalDigit(value[index+3]) {
+			code := (value[index+1]-'0')*100 + (value[index+2]-'0')*10 + (value[index+3] - '0')
+			decoded = append(decoded, code)
+			index += 3
+			continue
+		}
+		index++
+		decoded = append(decoded, value[index])
+	}
+	return string(decoded)
+}
+
+func isDecimalDigit(char byte) bool {
+	return char >= '0' && char <= '9'
 }

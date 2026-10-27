@@ -16,6 +16,7 @@ import (
 // for its interfaces.
 type cachedNode struct {
 	ID           string
+	Name         string
 	Instance     string
 	Hostname     string
 	AuthRequired bool
@@ -102,7 +103,7 @@ func chooseNode(nodes []cachedNode) (cachedNode, error) {
 			if len(node.Addresses) > 0 {
 				address = node.Addresses[0]
 			}
-			described = append(described, fmt.Sprintf("%s (%s)", node.ID, address))
+			described = append(described, fmt.Sprintf("%s (%s)", labelOf(node), address))
 		}
 		return cachedNode{}, fmt.Errorf("%d agents discovered, pass node explicitly: %s",
 			len(nodes), strings.Join(described, ", "))
@@ -149,6 +150,7 @@ func (s *Server) browseNodesFor(ctx context.Context, wait time.Duration) ([]cach
 			if !seen {
 				entry = &cachedNode{
 					ID:           node.ID,
+					Name:         node.Name,
 					Instance:     node.Instance,
 					Hostname:     node.Hostname,
 					AuthRequired: node.AuthRequired,
@@ -225,6 +227,14 @@ func logDiscovered(nodes []cachedNode) {
 	}
 }
 
+// labelOf prefers the human-readable name and falls back to the node ID.
+func labelOf(node cachedNode) string {
+	if node.Name != "" {
+		return node.Name + " " + node.ID
+	}
+	return node.ID
+}
+
 // describeNodes lists "id@address" pairs for logging.
 func describeNodes(nodes []cachedNode) string {
 	parts := make([]string, 0, len(nodes))
@@ -233,7 +243,7 @@ func describeNodes(nodes []cachedNode) string {
 		if len(node.Addresses) > 0 {
 			address = node.Addresses[0]
 		}
-		parts = append(parts, node.ID+"@"+address)
+		parts = append(parts, labelOf(node)+"@"+address)
 	}
 	return strings.Join(parts, ", ")
 }

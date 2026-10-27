@@ -62,7 +62,7 @@ func runAgent(args []string) error {
 	if len(config.TrustedClientKey) == 0 {
 		log.Print("WARNING: client authentication is disabled")
 	}
-	log.Printf("agent ID: %s", instance.ID())
+	log.Printf("agent %s (ID %s)", instance.Name(), instance.ID())
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return instance.Serve(ctx)
@@ -73,12 +73,13 @@ func runAgent(args []string) error {
 func resolveServeConfig(args []string) (config agent.Config, handled bool, err error) {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	flags.SetOutput(os.Stdout)
+	name := flags.String("name", "", "human-readable agent name advertised via mDNS (default: host name)")
 	listenAddress := flags.String("listen", agent.DefaultListenAddress, "QUIC UDP listen address")
 	stateDir := flags.String("state-dir", "", "identity state directory (default: OS user config directory)")
 	clientKeyHex := flags.String("client-public-key", agent.EmbeddedTrustedClientPublicKeyHex, "trusted client Ed25519 public key in hex")
 	allowUnauthenticated := flags.Bool("allow-unauthenticated", false, "allow clients without a trusted client key")
 	disableDiscovery := flags.Bool("no-discovery", false, "disable LAN mDNS advertisement")
-	maxTasks := flags.Int("max-runs", agent.DefaultMaxRuns, "maximum concurrently executing runs")
+	maxRuns := flags.Int("max-runs", agent.DefaultMaxRuns, "maximum concurrently executing runs")
 	maxStreams := flags.Int("max-streams", agent.DefaultMaxStreams, "maximum concurrently accepted run streams")
 	flags.Usage = func() {
 		fmt.Fprintln(os.Stdout, "Usage: remote-shell serve [options]")
@@ -117,12 +118,13 @@ func resolveServeConfig(args []string) (config agent.Config, handled bool, err e
 		return agent.Config{}, false, err
 	}
 	return agent.Config{
+		Name:                 *name,
 		ListenAddress:        *listenAddress,
 		StateDir:             *stateDir,
 		TrustedClientKey:     trustedKey,
 		AllowUnauthenticated: *allowUnauthenticated,
 		DisableDiscovery:     *disableDiscovery,
-		MaxConcurrentRuns:    *maxTasks,
+		MaxConcurrentRuns:    *maxRuns,
 		MaxConcurrentStreams: *maxStreams,
 	}, false, nil
 }

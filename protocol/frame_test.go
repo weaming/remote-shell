@@ -10,7 +10,7 @@ import (
 )
 
 func TestFrameRoundTrip(t *testing.T) {
-	want := Frame{Type: FrameShellStarted, Payload: []byte(`{"run_id":"sh-1"}`)}
+	want := Frame{Type: FrameShellStarted, Payload: []byte(`{"run_id":"a2ddddf2f663"}`)}
 	var encoded bytes.Buffer
 	if err := WriteFrame(&encoded, want); err != nil {
 		t.Fatal(err)
@@ -26,7 +26,7 @@ func TestFrameRoundTrip(t *testing.T) {
 
 func TestOutputFrameRoundTrip(t *testing.T) {
 	want := execution.Output{
-		RunID:  "sh-1",
+		RunID:  "a2ddddf2f663",
 		Seq:    42,
 		Stream: execution.StreamStderr,
 		Data:   []byte{0, 1, 2, 255},

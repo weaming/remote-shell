@@ -63,7 +63,7 @@ func TestToolsRunAndInspectOneCommand(t *testing.T) {
 	}
 	runID, _ := runData["run_id"].(string)
 	if runID == "" {
-		t.Fatal("run_command did not return a task ID")
+		t.Fatal("shell did not return a run ID")
 	}
 
 	stdout := callTool(t, session, "shell_output", map[string]any{"run_id": runID, "stream": "stdout"})
@@ -77,7 +77,7 @@ func TestToolsRunAndInspectOneCommand(t *testing.T) {
 
 	status := structured(t, callTool(t, session, "shell_status", map[string]any{"run_id": runID}))
 	if status["done"] != true || int(status["exit_code"].(float64)) != 3 {
-		t.Fatalf("unexpected task status: %v", status)
+		t.Fatalf("unexpected run status: %v", status)
 	}
 	listed := structured(t, callTool(t, session, "list_runs", map[string]any{}))
 	if runs, ok := listed["runs"].([]any); !ok || len(runs) != 1 {
@@ -85,7 +85,7 @@ func TestToolsRunAndInspectOneCommand(t *testing.T) {
 	}
 }
 
-func TestBackgroundTaskReportsOutputAndCancellation(t *testing.T) {
+func TestBackgroundRunReportsOutputAndCancellation(t *testing.T) {
 	requireBash(t)
 	address, privateKey := startAgent(t)
 	session := newSession(t, newBridge(t, address, privateKey))
@@ -98,7 +98,7 @@ func TestBackgroundTaskReportsOutputAndCancellation(t *testing.T) {
 	}))
 	runID, _ := started["run_id"].(string)
 	if runID == "" {
-		t.Fatal("background run did not return a task ID")
+		t.Fatal("background shell did not return a run ID")
 	}
 	waitForState(t, session, runID, stateSucceeded, 20*time.Second)
 	output := callTool(t, session, "shell_output", map[string]any{"run_id": runID, "stream": "stdout"})
@@ -115,7 +115,7 @@ func TestBackgroundTaskReportsOutputAndCancellation(t *testing.T) {
 	cancelID, _ := running["run_id"].(string)
 	cancelTool := callTool(t, session, "shell_cancel", map[string]any{"run_id": cancelID})
 	if cancelTool.IsError {
-		t.Fatalf("cancel_task failed: %s", resultText(cancelTool))
+		t.Fatalf("shell_cancel failed: %s", resultText(cancelTool))
 	}
 	waitForState(t, session, cancelID, stateCancelled, 25*time.Second)
 }
@@ -136,7 +136,7 @@ func TestInvalidInputIsReportedAsToolError(t *testing.T) {
 	}
 	unknown := callTool(t, session, "shell_output", map[string]any{"run_id": "t-missing"})
 	if !unknown.IsError {
-		t.Fatalf("unknown task must be a tool error: %s", resultText(unknown))
+		t.Fatalf("unknown run must be a tool error: %s", resultText(unknown))
 	}
 }
 
@@ -259,6 +259,22 @@ func TestIsLoopbackAddress(t *testing.T) {
 		if got := isLoopbackAddress(address); got != want {
 			t.Errorf("isLoopbackAddress(%q) = %t, want %t", address, got, want)
 		}
+	}
+}
+
+func TestMatchNodeAcceptsNameAndHostname(t *testing.T) {
+	nodes := []cachedNode{
+		{ID: "node-a", Name: "mini-garden", Hostname: "mini-garden.local", Addresses: []string{"10.0.0.1:42424"}},
+		{ID: "node-b", Name: "build-box", Hostname: "build.local", Addresses: []string{"10.0.0.2:42424"}},
+	}
+	for _, selector := range []string{"node-b", "build-box", "BUILD-BOX", "build.local", "build.local."} {
+		node, ok := matchNode(nodes, selector)
+		if !ok || node.ID != "node-b" {
+			t.Fatalf("matchNode(%q) = %v, %t; want node-b", selector, node.ID, ok)
+		}
+	}
+	if _, ok := matchNode(nodes, "nope"); ok {
+		t.Fatal("matchNode matched an unknown selector")
 	}
 }
 
@@ -439,7 +455,7 @@ func waitForState(t *testing.T, session *mcp.ClientSession, runID string, want r
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("task %s stayed at %v, want %s", runID, status["state"], want)
+			t.Fatalf("run %s stayed at %v, want %s", runID, status["state"], want)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

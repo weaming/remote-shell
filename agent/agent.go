@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,6 +41,9 @@ const (
 var EmbeddedTrustedClientPublicKeyHex string
 
 type Config struct {
+	// Name is the human-readable label for this agent, shown by discovery and
+	// accepted wherever a node is selected. Empty falls back to the host name.
+	Name                 string
 	ListenAddress        string
 	StateDir             string
 	TrustedClientKey     ed25519.PublicKey
@@ -51,6 +55,7 @@ type Config struct {
 
 type Agent struct {
 	config   Config
+	name     string
 	identity identity.ServerIdentity
 	tls      *tls.Config
 	runs     chan struct{}
@@ -98,6 +103,7 @@ func New(config Config) (*Agent, error) {
 	}
 	return &Agent{
 		config:   config,
+		name:     resolveName(config.Name),
 		identity: serverIdentity,
 		tls:      tlsConfig,
 		runs:     make(chan struct{}, config.MaxConcurrentRuns),
@@ -107,6 +113,48 @@ func New(config Config) (*Agent, error) {
 
 func (a *Agent) ID() string {
 	return a.identity.ID
+}
+
+// Name is the human-readable label advertised for this agent.
+func (a *Agent) Name() string {
+	return a.name
+}
+
+// resolveName picks the label this agent advertises: the configured name, or the
+// host name so every agent has something readable to show.
+func resolveName(configured string) string {
+	if name := strings.TrimSpace(configured); name != "" {
+		return name
+	}
+	hostname, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	hostname = strings.TrimSuffix(hostname, ".local")
+	if index := strings.IndexByte(hostname, '.'); index > 0 {
+		hostname = hostname[:index]
+	}
+	return hostname
+}
+
+// sanitizeName keeps an mDNS instance label readable and legal: lower-case
+// letters, digits, dash and underscore, collapsed and trimmed.
+func sanitizeName(name string) string {
+	var builder strings.Builder
+	previousDash := false
+	for _, char := range strings.ToLower(name) {
+		switch {
+		case char >= 'a' && char <= 'z', char >= '0' && char <= '9', char == '_':
+			builder.WriteRune(char)
+			previousDash = false
+		default:
+			if !previousDash && builder.Len() > 0 {
+				builder.WriteByte('-')
+				previousDash = true
+			}
+		}
+	}
+	return strings.Trim(builder.String(), "-")
 }
 
 func (a *Agent) Serve(ctx context.Context) error {
@@ -179,9 +227,15 @@ func (a *Agent) advertise(address net.Addr) (*zeroconf.Server, error) {
 	if !ok {
 		return nil, fmt.Errorf("unexpected QUIC listen address %T", address)
 	}
+	// Keep the instance unique even when two agents share a name: the identity
+	// suffix is what distinguishes them, the name is what humans read.
 	instance := "RemoteShell-" + strings.TrimPrefix(a.identity.ID, "node-")
+	if label := sanitizeName(a.name); label != "" {
+		instance = "RemoteShell-" + label + "-" + strings.TrimPrefix(a.identity.ID, "node-")
+	}
 	text := []string{
 		"id=" + a.identity.ID,
+		"name=" + a.name,
 		"proto=" + protocol.Version,
 		"auth=" + strconv.FormatBool(len(a.config.TrustedClientKey) != 0),
 	}
@@ -473,13 +527,15 @@ func (a *Agent) handleStream(connectionCtx context.Context, connection *quic.Con
 	request.finish(state, detail)
 }
 
-// newRunID returns the identifier the agent assigns to one run.
+// newRunID returns the opaque identifier the agent assigns to one run: 96 bits
+// of randomness, so an ID is never reused after an agent restarts and cannot
+// collide with a run another agent handed out.
 func newRunID() (string, error) {
-	raw := make([]byte, 6)
+	raw := make([]byte, 12)
 	if _, err := rand.Read(raw); err != nil {
 		return "", fmt.Errorf("generate run ID: %w", err)
 	}
-	return "sh-" + hex.EncodeToString(raw), nil
+	return hex.EncodeToString(raw), nil
 }
 
 // serveShellList answers a shell-list request and logs it like any other
