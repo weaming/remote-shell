@@ -326,17 +326,10 @@ func (s *Server) discoverNodes(ctx context.Context, _ *mcp.CallToolRequest, inpu
 	for _, view := range views {
 		// An agent advertises one address per interface, which is far too noisy
 		// for a prompt; the structured reply keeps them all.
-		shown := view.Addresses
-		suffix := ""
-		if len(shown) > maxShownAddresses {
-			suffix = fmt.Sprintf(" +%d more", len(shown)-maxShownAddresses)
-			shown = shown[:maxShownAddresses]
-		}
-		lines = append(lines, fmt.Sprintf("%s auth=%t %s %s",
-			labelOfNodeView(view), view.AuthRequired, strings.Join(shown, ",")+suffix, view.Hostname))
+		lines = append(lines, describeNodeView(view))
 	}
-	text := "no agent announced itself; pass an explicit host:port as node. " +
-		"In a container mDNS often cannot reach the LAN: use host.docker.internal:<port> or host networking."
+	text := "nodes=0 message=" + strconv.Quote("no agent announced itself; pass an explicit host:port as node. "+
+		"In a container mDNS often cannot reach the LAN: use host.docker.internal:<port> or host networking.")
 	if len(lines) > 0 {
 		text = strings.Join(lines, "\n")
 	}
@@ -344,12 +337,25 @@ func (s *Server) discoverNodes(ctx context.Context, _ *mcp.CallToolRequest, inpu
 		discoverNodesOutput{Nodes: views, WaitedMS: wait.Milliseconds()}, nil
 }
 
-// labelOfNodeView prefers the announced name over the node ID.
-func labelOfNodeView(view nodeView) string {
-	if view.Name != "" {
-		return view.Name + " " + view.ID
+// describeNodeView renders one discovered agent as a key=value line. The
+// address list is capped so a prompt is not flooded; `more` carries the rest.
+func describeNodeView(view nodeView) string {
+	shown := view.Addresses
+	if len(shown) > maxShownAddresses {
+		shown = shown[:maxShownAddresses]
 	}
-	return view.ID
+	line := "node=" + view.ID
+	if view.Name != "" {
+		line += " name=" + logValue(view.Name)
+	}
+	if view.Hostname != "" {
+		line += " host=" + view.Hostname
+	}
+	line += fmt.Sprintf(" auth=%t addrs=%s", view.AuthRequired, strings.Join(shown, ","))
+	if len(view.Addresses) > len(shown) {
+		line += fmt.Sprintf(" more=%d", len(view.Addresses)-len(shown))
+	}
+	return line
 }
 
 type nodeInput struct {
@@ -376,10 +382,7 @@ func (s *Server) listShells(ctx context.Context, _ *mcp.CallToolRequest, input n
 	for index, shell := range shells {
 		names[index] = string(shell)
 	}
-	text := "no supported shell is installed on " + address
-	if len(names) > 0 {
-		text = address + ": " + strings.Join(names, ", ")
-	}
+	text := fmt.Sprintf("node=%s shells=%s", address, strings.Join(names, ","))
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}},
 		listShellsOutput{Node: address, Shells: names}, nil
 }
@@ -590,13 +593,8 @@ func (s *Server) shellStatus(_ context.Context, _ *mcp.CallToolRequest, input ru
 		return nil, shellStatusOutput{}, fmt.Errorf("unknown run %q", input.RunID)
 	}
 	snap := record.snapshot()
-	text := fmt.Sprintf("%s", snap.ID)
-	if snap.Name != "" {
-		text += " name=" + logValue(snap.Name)
-	}
-	text += fmt.Sprintf(" state=%s exit_code=%d done=%t elapsed=%s stdout=%d stderr=%d trimmed=%d",
-		snap.State, snap.ExitCode, snap.Done, snap.duration().Round(time.Millisecond),
-		snap.StdoutBytes, snap.StderrBytes, snap.TrimmedBytes)
+	text := describeRun(snap) + fmt.Sprintf(" done=%t stdout=%d stderr=%d trimmed=%d",
+		snap.Done, snap.StdoutBytes, snap.StderrBytes, snap.TrimmedBytes)
 	if snap.ErrText != "" {
 		text += " error=" + snap.ErrText
 	}
@@ -696,7 +694,8 @@ func (s *Server) shellCancel(_ context.Context, _ *mcp.CallToolRequest, input ru
 		record.cancelRun()
 		note = "cancellation requested; the agent terminates the process group and reports the final state"
 	}
-	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: snap.ID + ": " + note}}},
+	text := fmt.Sprintf("run=%s state=%s note=%s", snap.ID, snap.State, strconv.Quote(note))
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}},
 		shellCancelOutput{RunID: snap.ID, State: string(snap.State), Note: note}, nil
 }
 

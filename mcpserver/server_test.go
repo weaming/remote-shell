@@ -77,6 +77,11 @@ func TestToolsRunAndInspectOneCommand(t *testing.T) {
 		t.Fatalf("stderr view = %q, want %q", got, "err")
 	}
 
+	statusText := resultText(callTool(t, session, "shell_status", map[string]any{"run_id": runID}))
+	if !strings.HasPrefix(statusText, "run="+runID+" ") || !strings.Contains(statusText, " state=") ||
+		!strings.Contains(statusText, " done=") {
+		t.Fatalf("shell_status text = %q, want key=value fields", statusText)
+	}
 	status := structured(t, callTool(t, session, "shell_status", map[string]any{"run_id": runID}))
 	if status["done"] != true || int(status["exit_code"].(float64)) != 3 {
 		t.Fatalf("unexpected run status: %v", status)
@@ -346,6 +351,21 @@ func TestTargetForPrefersLoopbackForLocalAgent(t *testing.T) {
 	}
 }
 
+func TestDescribeNodeViewIsKeyValue(t *testing.T) {
+	view := nodeView{
+		ID:           "node-a",
+		Name:         "Build Box",
+		Hostname:     "mini.local",
+		AuthRequired: true,
+		Addresses:    []string{"10.0.0.1:42424", "10.0.0.2:42424", "10.0.0.3:42424", "10.0.0.4:42424", "10.0.0.5:42424"},
+	}
+	line := describeNodeView(view)
+	want := `node=node-a name="Build Box" host=mini.local auth=true addrs=10.0.0.1:42424,10.0.0.2:42424,10.0.0.3:42424,10.0.0.4:42424 more=1`
+	if line != want {
+		t.Fatalf("describeNodeView = %q, want %q", line, want)
+	}
+}
+
 func TestShortHostName(t *testing.T) {
 	cases := map[string]string{
 		"mini-garden.local.": "mini-garden",
@@ -573,6 +593,11 @@ func waitForState(t *testing.T, session *mcp.ClientSession, runID string, want r
 	t.Helper()
 	deadline := time.Now().Add(budget)
 	for {
+		statusText := resultText(callTool(t, session, "shell_status", map[string]any{"run_id": runID}))
+		if !strings.HasPrefix(statusText, "run="+runID+" ") || !strings.Contains(statusText, " state=") ||
+			!strings.Contains(statusText, " done=") {
+			t.Fatalf("shell_status text = %q, want key=value fields", statusText)
+		}
 		status := structured(t, callTool(t, session, "shell_status", map[string]any{"run_id": runID}))
 		if status["state"] == string(want) {
 			return
