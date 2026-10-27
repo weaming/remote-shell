@@ -35,6 +35,41 @@ func TestWantsHelp(t *testing.T) {
 	}
 }
 
+func TestResolveMCPTransport(t *testing.T) {
+	cases := []struct {
+		name      string
+		transport string
+		explicit  map[string]bool
+		want      string
+		wantErr   bool
+	}{
+		{name: "default", transport: "stdio", explicit: map[string]bool{}, want: "stdio"},
+		{name: "listen implies http", transport: "stdio", explicit: map[string]bool{"listen": true}, want: "http"},
+		{name: "token implies http", transport: "stdio", explicit: map[string]bool{"auth-token": true}, want: "http"},
+		{name: "explicit http", transport: "http", explicit: map[string]bool{"transport": true, "listen": true}, want: "http"},
+		{name: "explicit stdio with listen", transport: "stdio", explicit: map[string]bool{"transport": true, "listen": true}, wantErr: true},
+		{name: "explicit stdio alone", transport: "stdio", explicit: map[string]bool{"transport": true}, want: "stdio"},
+		{name: "unknown transport", transport: "grpc", explicit: map[string]bool{"transport": true}, wantErr: true},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			got, err := resolveMCPTransport(testCase.transport, testCase.explicit)
+			if testCase.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error, got transport %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != testCase.want {
+				t.Fatalf("transport = %q, want %q", got, testCase.want)
+			}
+		})
+	}
+}
+
 func TestAllowUnauthenticatedOverridesEmbeddedKey(t *testing.T) {
 	original := agent.EmbeddedTrustedClientPublicKeyHex
 	agent.EmbeddedTrustedClientPublicKeyHex = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"

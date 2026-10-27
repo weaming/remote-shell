@@ -78,6 +78,24 @@ func (task TaskSpec) ExecutionTask() (execution.Task, error) {
 	return execution.Task{ID: task.ID, Mode: task.Mode, Commands: commands}, nil
 }
 
+// NewTaskSpec encodes a locally built task into its wire form. A zero command
+// timeout is sent as 0, which the agent resolves to its own default.
+func NewTaskSpec(task execution.Task) TaskSpec {
+	commands := make([]CommandSpec, len(task.Commands))
+	for index, command := range task.Commands {
+		commands[index] = CommandSpec{
+			ID:        command.ID,
+			Shell:     command.Shell,
+			Script:    command.Script,
+			CWD:       command.CWD,
+			Env:       command.Env,
+			Stdin:     command.Stdin,
+			TimeoutMS: command.Timeout.Milliseconds(),
+		}
+	}
+	return TaskSpec{ID: task.ID, Mode: task.Mode, Commands: commands}
+}
+
 type ErrorMessage struct {
 	Message string `json:"message"`
 }

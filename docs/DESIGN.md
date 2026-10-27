@@ -66,6 +66,10 @@ Agent 为命令创建受管进程组/等效任务边界。取消、超时、断�
 6. **鉴权与身份**：使用 `make keygen`（即 `scripts/build.fish keygen`）生成客户端密钥，默认保存到 `keys/client.key`（权限 `0600`，由 `.gitignore` 排除），同时将公钥记录在 `keys/client-key-info`。`make build` 生成 macOS arm64 与 Linux amd64 两个最小化构建，并将该公钥编入二进制；构建前会用 `remote-shell pubkey` 校验私钥与记录的公钥一致，不一致直接失败。客户端私钥可通过 `identity.LoadClientPrivateKey` 读取。Agent 的服务端身份自动生成并稳定保存，但客户端不验证它。
 7. **清理**：每条命令放入独立进程组。取消或超时后先 TERM，等待最多 10 秒，再 KILL。shell 自身退出（含非零退出）后，若组内仍有后代，立即 TERM，最多等 5 秒输出排空后 KILL，避免正常结束的任务被后台进程拖住 10 秒；超时仍未排空则关闭 agent 自身读端，保证任务不会永久卡住。Agent 退出时关闭连接并等待受管任务清理。无外部 supervisor；Agent 被 SIGKILL 或后代脱离进程组造成的残留已接受。
 8. **运行**：`remote-shell serve` 启动执行端；鉴权关闭需显式 `--allow-unauthenticated`。默认 mDNS 广播，也可用 `--no-discovery` 关闭。根命令和子命令均支持 `-h`、`--help`。构建逻辑在 `scripts/build.fish`：`GO`、`CGO_ENABLED`、`GOFLAGS`、`LDFLAGS`、`KEY_DIR`、`OUT_DIR` 通过环境变量共享，Makefile 只是转发这几个变量的薄封装。
+9. **MCP 桥接**：`remote-shell mcp` 把执行端暴露为 MCP 工具，支持 `--transport stdio`（默认）与 `--transport http`（streamable HTTP，端点 `/mcp`，默认只绑 `127.0.0.1:8765`，可用 `--auth-token` 要求 Bearer）。工具集：`discover_nodes`（mDNS 列节点）、`list_shells`、`run_command`（单条命令，可 `background`）、`task_status`、`task_output`（按 `all`/`stdout`/`stderr` 视图分页读取）、`list_tasks`、`cancel_task`。每次 `run_command` 单独拨一条 QUIC 连接，不连接池复用；任务结束或取消后连接即关闭，Agent 侧按断线语义清理。输出在桥接进程内按到达顺序缓存，超过 `--max-output-bytes`（默认 8 MiB）时丢弃最旧字节并用 `trimmed_bytes`/`next_offset` 如实报告；前台调用返回全部保留输出，后台任务通过 `task_status`/`task_output` 轮询。stdio 模式下日志只走 stderr，stdout 保持纯协议通道；`--node` 为默认目标，缺省时可用 `node` 参数传 `host:port` 或 `discover_nodes` 得到的节点 ID。非零退出码按正常结果返回，只有传输失败、取消、超时才标记为工具错误。
+支持的协议版本限定为 `2026-07-28` 与 `2025-11-25`（`ServerOptions.SupportedProtocolVersions`），更旧的版本一律拒绝，避免在未验证的语义下运行。
+HTTP 传输采用 stateless 模式：无需 initialize 握手、不下发 Mcp-Session-Id，因此 curl 或一次性脚本可直接调用，也能使用当前协议版本（2026-07-28，需带 Mcp-Method/Mcp-Name 及 _meta 路由信息）；旧版本（2025-11-25 及更早）同样可用。
+（`--listen` 与 `--auth-token` 只对 HTTP 有意义：未显式指定 `--transport` 时它们隐含选择 HTTP，显式写 `--transport stdio` 又带这两个参数会直接报错。）
 
 ## 已知限制与后续工作
 
@@ -79,3 +83,7 @@ Agent 为命令创建受管进程组/等效任务边界。取消、超时、断�
 - 收包按帧头声明长度一次性分配，最坏为 4 MiB × 并发 stream 上限；未对 stdin 单独设更小上限。
 - 命令被外部信号终止且没有取消/超时参与时，`exit_code` 为 -1、无 cancelled/timed_out 标志且 `error` 为空，客户端需按此约定识别信号致死；若同时有取消或超时，则以对应标志为准。
 - 运行核心目前用 Unix 进程组接口实现；Linux/macOS 为主要目标，其他 Unix 目标需构建验证。
+- MCP 桥接每次 `run_command` 都重新拨号，未做连接复用；局域网下握手开销可接受，广域场景会明显。
+- MCP 侧输出缓存有上限：超出 `--max-output-bytes` 的旧字节被丢弃，前台结果只能看到保留的尾部，需用 `task_output` 分页读取剩余部分。
+- MCP 的 HTTP 传输默认只监听回环地址；监听非回环地址时应配置 `--auth-token`，否则同网段任何人都能提交命令。
+- MCP 工具只下发单条命令；多条并行由模型发起多次调用，桥接进程不做任务级并行调度。

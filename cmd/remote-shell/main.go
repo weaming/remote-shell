@@ -15,6 +15,7 @@ import (
 
 	"remote-shell/agent"
 	"remote-shell/identity"
+	"remote-shell/mcpserver"
 )
 
 func main() {
@@ -39,8 +40,10 @@ func run(args []string) error {
 		return runKeygen(args[1:])
 	case "pubkey":
 		return runPubkey(args[1:])
+	case "mcp":
+		return runMCP(args[1:])
 	default:
-		return fmt.Errorf("unknown command %q; expected serve, keygen or pubkey", args[0])
+		return fmt.Errorf("unknown command %q; expected serve, mcp, keygen or pubkey", args[0])
 	}
 }
 
@@ -124,6 +127,97 @@ func resolveServeConfig(args []string) (config agent.Config, handled bool, err e
 	}, false, nil
 }
 
+// runMCP serves the MCP bridge, which turns each tool call into a task on a
+// remote agent. Logs and errors go to stderr so stdout stays a clean protocol
+// channel for the stdio transport.
+func runMCP(args []string) error {
+	flags := flag.NewFlagSet("mcp", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	transport := flags.String("transport", "stdio", "MCP transport: stdio or http")
+	listen := flags.String("listen", "127.0.0.1:8765", "HTTP listen address (--transport http)")
+	authToken := flags.String("auth-token", "", "bearer token required on every HTTP request (--transport http)")
+	clientKeyPath := flags.String("client-key", filepath.Join("keys", "client.key"), "client private key; empty connects only to an unauthenticated agent")
+	node := flags.String("node", "", "default agent address as host:port")
+	maxOutputBytes := flags.Int64("max-output-bytes", mcpserver.DefaultMaxOutputBytes, "retained output bytes per task")
+	discoveryWait := flags.Duration("discovery-wait", mcpserver.DefaultDiscoveryWait, "mDNS lookup budget per tool call")
+	flags.Usage = func() {
+		fmt.Fprintln(flags.Output(), "Usage: remote-shell mcp [options]")
+		flags.PrintDefaults()
+	}
+	if wantsHelp(args) {
+		flags.Usage()
+		return nil
+	}
+	if err := flags.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return nil
+		}
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected arguments: %v", flags.Args())
+	}
+	explicit := make(map[string]bool, 2)
+	flags.Visit(func(current *flag.Flag) { explicit[current.Name] = true })
+	mode, err := resolveMCPTransport(*transport, explicit)
+	if err != nil {
+		return err
+	}
+	if mode == "http" && !explicit["transport"] {
+		log.Print("--listen/--auth-token imply --transport http")
+	}
+
+	config := mcpserver.Config{
+		DefaultNode:    *node,
+		MaxOutputBytes: *maxOutputBytes,
+		DiscoveryWait:  *discoveryWait,
+	}
+	if *clientKeyPath != "" {
+		clientKey, err := identity.LoadClientPrivateKey(*clientKeyPath)
+		if err != nil {
+			return err
+		}
+		config.ClientKey = clientKey
+	} else {
+		log.Print("WARNING: no client key configured; the agent must run with --allow-unauthenticated")
+	}
+	bridge, err := mcpserver.New(config)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if mode == "http" {
+		return bridge.ServeHTTP(ctx, *listen, *authToken)
+	}
+	hint := ""
+	if config.DefaultNode == "" {
+		hint = "; no default node, pass node per call or set --node"
+	}
+	log.Printf("mcp stdio ready (default node %q%s)", config.DefaultNode, hint)
+	return bridge.ServeStdio(ctx)
+}
+
+// resolveMCPTransport picks the transport for the mcp command. The stdio
+// transport owns stdin/stdout and never listens, so an HTTP-only flag selects
+// HTTP on its own unless --transport was given explicitly.
+func resolveMCPTransport(transport string, explicit map[string]bool) (string, error) {
+	if transport != "stdio" && transport != "http" {
+		return "", fmt.Errorf("unsupported transport %q; expected stdio or http", transport)
+	}
+	httpOnly := explicit["listen"] || explicit["auth-token"]
+	if !explicit["transport"] {
+		if httpOnly {
+			return "http", nil
+		}
+		return transport, nil
+	}
+	if transport == "stdio" && httpOnly {
+		return "", fmt.Errorf("--listen/--auth-token cannot be combined with --transport stdio")
+	}
+	return transport, nil
+}
+
 func runKeygen(args []string) error {
 	flags := flag.NewFlagSet("keygen", flag.ContinueOnError)
 	flags.SetOutput(os.Stdout)
@@ -179,9 +273,10 @@ func runKeygen(args []string) error {
 }
 
 func printRootUsage() {
-	fmt.Fprintln(os.Stdout, "Usage: remote-shell <serve|keygen|pubkey> [options]")
+	fmt.Fprintln(os.Stdout, "Usage: remote-shell <serve|mcp|keygen|pubkey> [options]")
 	fmt.Fprintln(os.Stdout, "Commands:")
 	fmt.Fprintln(os.Stdout, "  serve   Run the remote execution agent")
+	fmt.Fprintln(os.Stdout, "  mcp     Serve the MCP tools over stdio or streamable HTTP")
 	fmt.Fprintln(os.Stdout, "  keygen  Generate a client authentication key")
 	fmt.Fprintln(os.Stdout, "  pubkey  Print the public key of a client private key")
 	fmt.Fprintln(os.Stdout, "Use 'remote-shell <command> -h' for command options.")
