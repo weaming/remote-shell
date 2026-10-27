@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -86,6 +88,41 @@ func (c *nodeCache) preferred(node cachedNode) []string {
 		}
 	}
 	return addresses
+}
+
+// isLocalHost reports whether an advertised host name belongs to this machine,
+// so the bridge can reach the agent over loopback instead of an interface.
+func isLocalHost(hostname string) bool {
+	local, err := os.Hostname()
+	if err != nil || local == "" {
+		return false
+	}
+	return shortHostName(hostname) == shortHostName(local)
+}
+
+// shortHostName normalises "Host.Local." and "host.example.com" to "host".
+func shortHostName(name string) string {
+	name = strings.ToLower(strings.TrimSuffix(name, "."))
+	name = strings.TrimSuffix(name, ".local")
+	if index := strings.IndexByte(name, '.'); index > 0 {
+		name = name[:index]
+	}
+	return name
+}
+
+// loopbackCandidates returns loopback addresses on the node's advertised port.
+func loopbackCandidates(node cachedNode) []string {
+	for _, address := range node.Addresses {
+		_, port, err := net.SplitHostPort(address)
+		if err != nil {
+			continue
+		}
+		return []string{
+			net.JoinHostPort("127.0.0.1", port),
+			net.JoinHostPort("::1", port),
+		}
+	}
+	return nil
 }
 
 // chooseNode picks the only discovered agent, and refuses to guess between

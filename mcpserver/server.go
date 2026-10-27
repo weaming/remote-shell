@@ -728,10 +728,16 @@ func (s *Server) resolveNode(ctx context.Context, selector string) (dialTarget, 
 
 // targetFor builds the dial target of a discovered node.
 func (s *Server) targetFor(node cachedNode) dialTarget {
+	addresses := preferAddresses(s.discovery.preferred(node))
+	// A local agent is reachable over loopback: no interface needs to be up and
+	// no incoming-connection prompt fires for 127.0.0.1.
+	if isLocalHost(node.Hostname) {
+		addresses = append(loopbackCandidates(node), addresses...)
+	}
 	return dialTarget{
 		nodeID:     node.ID,
 		discovered: true,
-		addresses:  preferAddresses(s.discovery.preferred(node)),
+		addresses:  addresses,
 	}
 }
 

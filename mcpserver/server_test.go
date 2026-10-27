@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
 	"slices"
 	"strings"
@@ -275,6 +276,53 @@ func TestMatchNodeAcceptsNameAndHostname(t *testing.T) {
 	}
 	if _, ok := matchNode(nodes, "nope"); ok {
 		t.Fatal("matchNode matched an unknown selector")
+	}
+}
+
+// An agent on this machine must be dialed over loopback first, so the bridge
+// does not depend on any interface being up.
+func TestTargetForPrefersLoopbackForLocalAgent(t *testing.T) {
+	hostname, err := os.Hostname()
+	if err != nil {
+		t.Skip("host name is unavailable")
+	}
+	bridge, err := New(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := bridge.targetFor(cachedNode{
+		ID:        "node-local",
+		Hostname:  hostname + ".local",
+		Addresses: []string{"192.168.0.3:42424"},
+	})
+	if len(local.addresses) < 3 || local.addresses[0] != "127.0.0.1:42424" {
+		t.Fatalf("addresses = %v, want loopback first", local.addresses)
+	}
+	if !slices.Contains(local.addresses, "192.168.0.3:42424") {
+		t.Fatalf("addresses = %v, want the advertised address kept as a fallback", local.addresses)
+	}
+
+	remote := bridge.targetFor(cachedNode{
+		ID:        "node-remote",
+		Hostname:  "some-other-host.local",
+		Addresses: []string{"192.168.0.9:42424"},
+	})
+	if len(remote.addresses) != 1 || remote.addresses[0] != "192.168.0.9:42424" {
+		t.Fatalf("addresses = %v, want only the advertised address", remote.addresses)
+	}
+}
+
+func TestShortHostName(t *testing.T) {
+	cases := map[string]string{
+		"mini-garden.local.": "mini-garden",
+		"Mini-Garden":        "mini-garden",
+		"build.example.com":  "build",
+		"":                   "",
+	}
+	for input, want := range cases {
+		if got := shortHostName(input); got != want {
+			t.Errorf("shortHostName(%q) = %q, want %q", input, got, want)
+		}
 	}
 }
 
