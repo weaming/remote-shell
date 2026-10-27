@@ -130,7 +130,9 @@ func loopbackCandidates(node cachedNode) []string {
 func chooseNode(nodes []cachedNode) (cachedNode, error) {
 	switch len(nodes) {
 	case 0:
-		return cachedNode{}, fmt.Errorf("no agent discovered on the local network; start one or pass node as host:port")
+		return cachedNode{}, fmt.Errorf("no agent discovered on the local network; start one, pass node as host:port, " +
+			"or — when this bridge runs in a container — use host.docker.internal:<port> or host networking, " +
+			"because a bridge network does not forward mDNS")
 	case 1:
 		return nodes[0], nil
 	default:

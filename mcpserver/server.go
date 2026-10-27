@@ -328,7 +328,8 @@ func (s *Server) discoverNodes(ctx context.Context, _ *mcp.CallToolRequest, inpu
 		lines = append(lines, fmt.Sprintf("%s auth=%t %s %s",
 			labelOfNodeView(view), view.AuthRequired, strings.Join(shown, ",")+suffix, view.Hostname))
 	}
-	text := "no agent announced itself; pass an explicit host:port as node"
+	text := "no agent announced itself; pass an explicit host:port as node. " +
+		"In a container mDNS often cannot reach the LAN: use host.docker.internal:<port> or host networking."
 	if len(lines) > 0 {
 		text = strings.Join(lines, "\n")
 	}
