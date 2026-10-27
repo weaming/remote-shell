@@ -70,7 +70,7 @@ Agent 为命令创建受管进程组/等效运行边界。取消、超时、断�
 未给 `node` 且没有 `--node` 时，桥接自动使用 mDNS 发现的唯一 Agent。发现结果一经找到就缓存，不按时间过期；只有连接失败时才丢弃缓存并重新搜索、重试一次，找到/丢弃都会记一行日志。每个节点还会记住上次连通的地址并优先尝试；若节点的主机名与本机一致，先试 `127.0.0.1:<端口>`（再 `[::1]`），因此同机连接不依赖任何网卡、也不会触发 macOS 的入站连接授权弹窗；发现到多个 Agent 时报错并列出候选，不做猜测。
 支持的协议版本限定为 `2026-07-28` 与 `2025-11-25`（`ServerOptions.SupportedProtocolVersions`），更旧的版本一律拒绝，避免在未验证的语义下运行。
 HTTP 传输采用 stateless 模式：无需 initialize 握手、不下发 Mcp-Session-Id，因此 curl 或一次性脚本可直接调用，也能使用当前协议版本（2026-07-28，需带 Mcp-Method/Mcp-Name 及 _meta 路由信息）；旧版本（2025-11-25 及更早）同样可用。
-（`--listen` 与 `--auth-token` 只对 HTTP 有意义：未显式指定 `--transport` 时它们隐含选择 HTTP，显式写 `--transport stdio` 又带这两个参数会直接报错。）
+（没有独立的传输开关：HTTP 只由 `--listen`/`--auth-token` 决定，避免与默认值冲突。）
 Agent 日志：一次运行的两行以 run ID 打头，`run=<id> event=start …` 与 `run=<id> event=done …`（state=succeeded|failed|cancelled|timed_out、duration、exit、stdout/stderr 字节数），按 run ID 直接配对；瞬时请求（shell 列表）只记一行 `event=done kind=shells state=… duration=… remote=…`。不再有额外的请求序号，也不记录客户端 ID。
 
 ## 已知限制与后续工作

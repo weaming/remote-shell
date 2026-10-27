@@ -135,9 +135,8 @@ func resolveServeConfig(args []string) (config agent.Config, handled bool, err e
 func runMCP(args []string) error {
 	flags := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
-	transport := flags.String("transport", "stdio", "MCP transport: stdio or http")
-	listen := flags.String("listen", "127.0.0.1:8765", "HTTP listen address (--transport http)")
-	authToken := flags.String("auth-token", "", "bearer token required on every HTTP request (--transport http)")
+	listen := flags.String("listen", "127.0.0.1:8765", "HTTP listen address; setting it switches the bridge from stdio to HTTP")
+	authToken := flags.String("auth-token", "", "bearer token required on every HTTP request; also switches to HTTP")
 	clientKeyPath := flags.String("client-key", filepath.Join("keys", "client.key"), "client private key; empty connects only to an unauthenticated agent")
 	node := flags.String("node", "", "default agent address as host:port")
 	maxOutputBytes := flags.Int64("max-output-bytes", mcpserver.DefaultMaxOutputBytes, "retained output bytes per run")
@@ -161,13 +160,7 @@ func runMCP(args []string) error {
 	}
 	explicit := make(map[string]bool, 2)
 	flags.Visit(func(current *flag.Flag) { explicit[current.Name] = true })
-	mode, err := resolveMCPTransport(*transport, explicit)
-	if err != nil {
-		return err
-	}
-	if mode == "http" && !explicit["transport"] {
-		log.Print("--listen/--auth-token imply --transport http")
-	}
+	mode := resolveMCPMode(explicit)
 
 	config := mcpserver.Config{
 		DefaultNode:    *node,
@@ -200,24 +193,13 @@ func runMCP(args []string) error {
 	return bridge.ServeStdio(ctx)
 }
 
-// resolveMCPTransport picks the transport for the mcp command. The stdio
-// transport owns stdin/stdout and never listens, so an HTTP-only flag selects
-// HTTP on its own unless --transport was given explicitly.
-func resolveMCPTransport(transport string, explicit map[string]bool) (string, error) {
-	if transport != "stdio" && transport != "http" {
-		return "", fmt.Errorf("unsupported transport %q; expected stdio or http", transport)
+// resolveMCPMode picks how the bridge talks to its MCP client. stdio owns
+// stdin/stdout and never listens, so only the HTTP-only flags select HTTP.
+func resolveMCPMode(explicit map[string]bool) string {
+	if explicit["listen"] || explicit["auth-token"] {
+		return "http"
 	}
-	httpOnly := explicit["listen"] || explicit["auth-token"]
-	if !explicit["transport"] {
-		if httpOnly {
-			return "http", nil
-		}
-		return transport, nil
-	}
-	if transport == "stdio" && httpOnly {
-		return "", fmt.Errorf("--listen/--auth-token cannot be combined with --transport stdio")
-	}
-	return transport, nil
+	return "stdio"
 }
 
 func runKeygen(args []string) error {

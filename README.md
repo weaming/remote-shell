@@ -21,7 +21,7 @@ make keygen    # 生成 keys/client.key（0600）与 keys/client-key-info
 make build     # 构建 dist/remote-shell-{darwin-arm64,linux-amd64}，公钥编入二进制
 
 ./dist/remote-shell-darwin-arm64 serve --name build-box   # 默认 UDP :42424 + mDNS
-./dist/remote-shell-darwin-arm64 mcp                     # stdio；--transport http 走 /mcp
+./dist/remote-shell-darwin-arm64 mcp                     # stdio；加 --listen 127.0.0.1:8765 即切到 HTTP（/mcp）
 ```
 
 Agent 首次启动会在状态目录（macOS `~/Library/Application Support/remote-shell/`）生成并复用 `identity.key`；`node-…` 是它的公钥指纹。
