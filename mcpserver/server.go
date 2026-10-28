@@ -397,7 +397,7 @@ type shellInput struct {
 	Env         map[string]string `json:"env,omitempty" jsonschema:"extra environment variables for the command"`
 	EnableProxy bool              `json:"enable_proxy,omitempty" jsonschema:"set HTTP_PROXY and HTTPS_PROXY from the agent's configured HTTP proxy; rejected if the agent has no proxy configured"`
 	Stdin       string            `json:"stdin,omitempty" jsonschema:"text written to the command's stdin"`
-	TimeoutMS   int64             `json:"timeout_ms,omitempty" jsonschema:"command timeout in milliseconds; 0 uses the agent default of 300000, maximum 3600000"`
+	Timeout     int64             `json:"timeout,omitempty" jsonschema:"command timeout in seconds; 0 uses the agent default of 300 seconds, maximum 3600 seconds"`
 	Background  bool              `json:"background,omitempty" jsonschema:"return the run ID as soon as the agent accepts the command instead of waiting for it to finish"`
 }
 
@@ -431,9 +431,9 @@ func (s *Server) runShell(ctx context.Context, _ *mcp.CallToolRequest, input she
 	if !filepath.IsAbs(cwd) && cwd != "~" && !strings.HasPrefix(cwd, "~/") {
 		return nil, shellRunOutput{}, fmt.Errorf("cwd must be an absolute path or start with ~")
 	}
-	timeout := time.Duration(input.TimeoutMS) * time.Millisecond
-	if input.TimeoutMS < 0 || timeout > execution.MaxTimeout {
-		return nil, shellRunOutput{}, fmt.Errorf("timeout_ms must be between 0 and %d", execution.MaxTimeout.Milliseconds())
+	timeout := time.Duration(input.Timeout) * time.Second
+	if input.Timeout < 0 || timeout > execution.MaxTimeout {
+		return nil, shellRunOutput{}, fmt.Errorf("timeout must be between 0 and %d seconds", int64(execution.MaxTimeout/time.Second))
 	}
 	target, err := s.resolveNode(ctx, input.Node)
 	if err != nil {

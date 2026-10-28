@@ -55,17 +55,17 @@ type CommandSpec struct {
 	Env         map[string]string `json:"env,omitempty"`
 	EnableProxy bool              `json:"enable_proxy,omitempty"`
 	Stdin       []byte            `json:"stdin,omitempty"`
-	TimeoutMS   int64             `json:"timeout_ms,omitempty"`
+	Timeout     int64             `json:"timeout,omitempty"`
 }
 
 // ExecutionCommand decodes the wire command. A zero timeout becomes the agent
 // default.
 func (spec CommandSpec) ExecutionCommand() (execution.Command, error) {
-	if spec.TimeoutMS < 0 || spec.TimeoutMS > int64(execution.MaxTimeout/time.Millisecond) {
-		return execution.Command{}, fmt.Errorf("timeout_ms must be between 0 and %d", execution.MaxTimeout.Milliseconds())
+	if spec.Timeout < 0 || spec.Timeout > int64(execution.MaxTimeout/time.Second) {
+		return execution.Command{}, fmt.Errorf("timeout must be between 0 and %d seconds", int64(execution.MaxTimeout/time.Second))
 	}
-	timeout := time.Duration(spec.TimeoutMS) * time.Millisecond
-	if spec.TimeoutMS == 0 {
+	timeout := time.Duration(spec.Timeout) * time.Second
+	if spec.Timeout == 0 {
 		timeout = execution.DefaultTimeout
 	}
 	return execution.Command{
@@ -89,7 +89,7 @@ func NewCommandSpec(command execution.Command) CommandSpec {
 		Env:         command.Env,
 		EnableProxy: command.EnableProxy,
 		Stdin:       command.Stdin,
-		TimeoutMS:   command.Timeout.Milliseconds(),
+		Timeout:     int64(command.Timeout / time.Second),
 	}
 }
 

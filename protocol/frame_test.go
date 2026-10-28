@@ -58,11 +58,11 @@ func TestCommandSpecRoundTrip(t *testing.T) {
 		Env:         map[string]string{"A": "b"},
 		EnableProxy: true,
 		Stdin:       []byte("in"),
-		Timeout:     2500 * time.Millisecond,
+		Timeout:     2 * time.Second,
 	}
 	spec := NewCommandSpec(command)
-	if spec.TimeoutMS != 2500 {
-		t.Fatalf("timeout_ms = %d, want 2500", spec.TimeoutMS)
+	if spec.Timeout != 2 {
+		t.Fatalf("timeout = %d, want 2 seconds", spec.Timeout)
 	}
 	decoded, err := spec.ExecutionCommand()
 	if err != nil {
@@ -85,7 +85,7 @@ func TestCommandSpecRoundTrip(t *testing.T) {
 			t.Fatalf("zero timeout = %s, want %s", zero.Timeout, execution.DefaultTimeout)
 		}
 	}
-	_, err = (CommandSpec{TimeoutMS: 3600001}).ExecutionCommand()
+	_, err = (CommandSpec{Timeout: 3601}).ExecutionCommand()
 	if err == nil {
 		t.Fatal("expected timeout above one hour to be rejected")
 	}

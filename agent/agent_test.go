@@ -69,10 +69,10 @@ func TestAgentStreamsAuthenticatedRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	request, err := protocol.MarshalFrame(protocol.FrameShellRequest, protocol.CommandSpec{
-		Shell:     execution.ShellBash,
-		Script:    "printf hello; printf problem >&2",
-		CWD:       t.TempDir(),
-		TimeoutMS: 5000,
+		Shell:   execution.ShellBash,
+		Script:  "printf hello; printf problem >&2",
+		CWD:     t.TempDir(),
+		Timeout: 5,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -202,7 +202,7 @@ responseLoop:
 		t.Fatal(err)
 	}
 	cancelRequest, err := protocol.MarshalFrame(protocol.FrameShellRequest, protocol.CommandSpec{
-		Shell: execution.ShellBash, Script: "sleep 30", CWD: t.TempDir(), TimeoutMS: 30000,
+		Shell: execution.ShellBash, Script: "sleep 30", CWD: t.TempDir(), Timeout: 30,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -565,7 +565,7 @@ func TestAgentAcceptsQueuedRequestAfterStreamSlotFrees(t *testing.T) {
 		t.Fatal(err)
 	}
 	request, err := protocol.MarshalFrame(protocol.FrameShellRequest, protocol.CommandSpec{
-		Shell: execution.ShellBash, Script: "exit 0", CWD: t.TempDir(), TimeoutMS: 5000,
+		Shell: execution.ShellBash, Script: "exit 0", CWD: t.TempDir(), Timeout: 5,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -822,7 +822,7 @@ func openRunStream(t *testing.T, connection *quic.Conn, clientID, runID, script 
 		return nil, err
 	}
 	request, err := protocol.MarshalFrame(protocol.FrameShellRequest, protocol.CommandSpec{
-		Shell: execution.ShellBash, Script: script, CWD: t.TempDir(), TimeoutMS: 5000,
+		Shell: execution.ShellBash, Script: script, CWD: t.TempDir(), Timeout: 5,
 	})
 	if err != nil {
 		return nil, err
