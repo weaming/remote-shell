@@ -34,12 +34,13 @@ const (
 // Command is one shell invocation, which is the only unit of work an agent
 // runs.
 type Command struct {
-	Shell   Shell
-	Script  string
-	CWD     string
-	Env     map[string]string
-	Stdin   []byte
-	Timeout time.Duration
+	Shell       Shell
+	Script      string
+	CWD         string
+	Env         map[string]string
+	EnableProxy bool
+	Stdin       []byte
+	Timeout     time.Duration
 }
 
 // Output is one chunk forwarded from a running command. Order is the order the

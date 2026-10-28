@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -24,6 +25,17 @@ import (
 	"remote-shell/identity"
 	"remote-shell/protocol"
 )
+
+func validateProxyURL(proxyURL string) error {
+	if proxyURL == "" {
+		return nil
+	}
+	parsed, err := url.Parse(proxyURL)
+	if err != nil || parsed.Scheme != "http" || parsed.Host == "" || parsed.Fragment != "" {
+		return fmt.Errorf("proxy must be a valid HTTP URL")
+	}
+	return nil
+}
 
 const (
 	DefaultListenAddress = ":42424"
@@ -54,6 +66,7 @@ type Config struct {
 	DisableDiscovery     bool
 	MaxConcurrentRuns    int
 	MaxConcurrentStreams int
+	ProxyURL             string
 }
 
 type Agent struct {
@@ -66,6 +79,9 @@ type Agent struct {
 }
 
 func New(config Config) (*Agent, error) {
+	if err := validateProxyURL(config.ProxyURL); err != nil {
+		return nil, err
+	}
 	if config.ListenAddress == "" {
 		config.ListenAddress = DefaultListenAddress
 	}
@@ -528,6 +544,21 @@ func (a *Agent) handleStream(connectionCtx context.Context, connection *quic.Con
 		a.writeError(stream, err)
 		request.finish("failed", err.Error())
 		return
+	}
+	if spec.EnableProxy {
+		if a.config.ProxyURL == "" {
+			cause := fmt.Errorf("proxy is not enabled on this agent; configure --proxy or HTTPS_PROXY")
+			a.writeError(stream, cause)
+			request.finish("failed", cause.Error())
+			return
+		}
+		if command.Env == nil {
+			command.Env = make(map[string]string)
+		}
+		command.Env["HTTP_PROXY"] = a.config.ProxyURL
+		command.Env["HTTPS_PROXY"] = a.config.ProxyURL
+		command.Env["http_proxy"] = a.config.ProxyURL
+		command.Env["https_proxy"] = a.config.ProxyURL
 	}
 	runID, err := newRunID()
 	if err != nil {

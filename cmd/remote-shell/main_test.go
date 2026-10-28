@@ -72,6 +72,26 @@ func TestAllowUnauthenticatedOverridesEmbeddedKey(t *testing.T) {
 	}
 }
 
+func TestResolveServeConfigProxySources(t *testing.T) {
+	t.Setenv("HTTPS_PROXY", "http://env-proxy.example:8080")
+
+	fromEnvironment, _, err := resolveServeConfig([]string{"--allow-unauthenticated"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fromEnvironment.ProxyURL != "http://env-proxy.example:8080" {
+		t.Fatalf("proxy from HTTPS_PROXY = %q", fromEnvironment.ProxyURL)
+	}
+
+	fromFlag, _, err := resolveServeConfig([]string{"--allow-unauthenticated", "--proxy", "http://flag-proxy.example:8081"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fromFlag.ProxyURL != "http://flag-proxy.example:8081" {
+		t.Fatalf("--proxy did not take precedence: %q", fromFlag.ProxyURL)
+	}
+}
+
 func TestExplicitClientKeyConflictsWithAllowUnauthenticated(t *testing.T) {
 	_, _, err := resolveServeConfig([]string{
 		"--allow-unauthenticated",

@@ -390,14 +390,15 @@ func (s *Server) listShells(ctx context.Context, _ *mcp.CallToolRequest, input n
 }
 
 type shellInput struct {
-	Node       string            `json:"node,omitempty" jsonschema:"agent address host:port, its --name, its host name, or a node ID; when omitted the bridge uses --node, otherwise the only agent it discovered on the local network"`
-	Shell      string            `json:"shell" jsonschema:"shell that runs the script: bash, fish or zsh; use list_shells to see what the agent has"`
-	Script     string            `json:"script" jsonschema:"script text passed to the shell with -c"`
-	CWD        string            `json:"cwd" jsonschema:"working directory on the agent host: an absolute path, or ~ / ~/sub to use the agent user's home"`
-	Env        map[string]string `json:"env,omitempty" jsonschema:"extra environment variables for the command"`
-	Stdin      string            `json:"stdin,omitempty" jsonschema:"text written to the command's stdin"`
-	TimeoutMS  int64             `json:"timeout_ms,omitempty" jsonschema:"command timeout in milliseconds; 0 uses the agent default of 300000, maximum 3600000"`
-	Background bool              `json:"background,omitempty" jsonschema:"return the run ID as soon as the agent accepts the command instead of waiting for it to finish"`
+	Node        string            `json:"node,omitempty" jsonschema:"agent address host:port, its --name, its host name, or a node ID; when omitted the bridge uses --node, otherwise the only agent it discovered on the local network"`
+	Shell       string            `json:"shell" jsonschema:"shell that runs the script: bash, fish or zsh; use list_shells to see what the agent has"`
+	Script      string            `json:"script" jsonschema:"script text passed to the shell with -c"`
+	CWD         string            `json:"cwd" jsonschema:"working directory on the agent host: an absolute path, or ~ / ~/sub to use the agent user's home"`
+	Env         map[string]string `json:"env,omitempty" jsonschema:"extra environment variables for the command"`
+	EnableProxy bool              `json:"enable_proxy,omitempty" jsonschema:"set HTTP_PROXY and HTTPS_PROXY from the agent's configured HTTP proxy; rejected if the agent has no proxy configured"`
+	Stdin       string            `json:"stdin,omitempty" jsonschema:"text written to the command's stdin"`
+	TimeoutMS   int64             `json:"timeout_ms,omitempty" jsonschema:"command timeout in milliseconds; 0 uses the agent default of 300000, maximum 3600000"`
+	Background  bool              `json:"background,omitempty" jsonschema:"return the run ID as soon as the agent accepts the command instead of waiting for it to finish"`
 }
 
 type shellRunOutput struct {
@@ -439,12 +440,13 @@ func (s *Server) runShell(ctx context.Context, _ *mcp.CallToolRequest, input she
 		return nil, shellRunOutput{}, err
 	}
 	command := execution.Command{
-		Shell:   shell,
-		Script:  input.Script,
-		CWD:     cwd,
-		Env:     input.Env,
-		Stdin:   []byte(input.Stdin),
-		Timeout: timeout,
+		Shell:       shell,
+		Script:      input.Script,
+		CWD:         cwd,
+		Env:         input.Env,
+		EnableProxy: input.EnableProxy,
+		Stdin:       []byte(input.Stdin),
+		Timeout:     timeout,
 	}
 	// A foreground run follows the requesting call, so an MCP cancellation
 	// stops the command. A background run outlives the call on purpose.

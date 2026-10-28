@@ -80,6 +80,7 @@ func resolveServeConfig(args []string) (config agent.Config, handled bool, err e
 	disableDiscovery := flags.Bool("no-discovery", false, "disable LAN mDNS advertisement")
 	maxRuns := flags.Int("max-runs", agent.DefaultMaxRuns, "maximum concurrently executing runs")
 	maxStreams := flags.Int("max-streams", agent.DefaultMaxStreams, "maximum concurrently accepted run streams")
+	proxy := flags.String("proxy", "", "HTTP proxy URL for shell commands; defaults to HTTPS_PROXY when set")
 	flags.Usage = func() {
 		fmt.Fprintln(os.Stdout, "Usage: remote-shell serve [options]")
 		flags.PrintDefaults()
@@ -116,6 +117,10 @@ func resolveServeConfig(args []string) (config agent.Config, handled bool, err e
 	if err != nil {
 		return agent.Config{}, false, err
 	}
+	proxyURL := strings.TrimSpace(*proxy)
+	if proxyURL == "" {
+		proxyURL = strings.TrimSpace(os.Getenv("HTTPS_PROXY"))
+	}
 	return agent.Config{
 		Name:                 *name,
 		ListenAddress:        *listenAddress,
@@ -124,6 +129,7 @@ func resolveServeConfig(args []string) (config agent.Config, handled bool, err e
 		DisableDiscovery:     *disableDiscovery,
 		MaxConcurrentRuns:    *maxRuns,
 		MaxConcurrentStreams: *maxStreams,
+		ProxyURL:             proxyURL,
 	}, false, nil
 }
 

@@ -49,12 +49,13 @@ type ShellStarted struct {
 }
 
 type CommandSpec struct {
-	Shell     execution.Shell   `json:"shell"`
-	Script    string            `json:"script"`
-	CWD       string            `json:"cwd"`
-	Env       map[string]string `json:"env,omitempty"`
-	Stdin     []byte            `json:"stdin,omitempty"`
-	TimeoutMS int64             `json:"timeout_ms,omitempty"`
+	Shell       execution.Shell   `json:"shell"`
+	Script      string            `json:"script"`
+	CWD         string            `json:"cwd"`
+	Env         map[string]string `json:"env,omitempty"`
+	EnableProxy bool              `json:"enable_proxy,omitempty"`
+	Stdin       []byte            `json:"stdin,omitempty"`
+	TimeoutMS   int64             `json:"timeout_ms,omitempty"`
 }
 
 // ExecutionCommand decodes the wire command. A zero timeout becomes the agent
@@ -68,12 +69,13 @@ func (spec CommandSpec) ExecutionCommand() (execution.Command, error) {
 		timeout = execution.DefaultTimeout
 	}
 	return execution.Command{
-		Shell:   spec.Shell,
-		Script:  spec.Script,
-		CWD:     spec.CWD,
-		Env:     spec.Env,
-		Stdin:   spec.Stdin,
-		Timeout: timeout,
+		Shell:       spec.Shell,
+		Script:      spec.Script,
+		CWD:         spec.CWD,
+		Env:         spec.Env,
+		EnableProxy: spec.EnableProxy,
+		Stdin:       spec.Stdin,
+		Timeout:     timeout,
 	}, nil
 }
 
@@ -81,12 +83,13 @@ func (spec CommandSpec) ExecutionCommand() (execution.Command, error) {
 // which the agent resolves to its own default.
 func NewCommandSpec(command execution.Command) CommandSpec {
 	return CommandSpec{
-		Shell:     command.Shell,
-		Script:    command.Script,
-		CWD:       command.CWD,
-		Env:       command.Env,
-		Stdin:     command.Stdin,
-		TimeoutMS: command.Timeout.Milliseconds(),
+		Shell:       command.Shell,
+		Script:      command.Script,
+		CWD:         command.CWD,
+		Env:         command.Env,
+		EnableProxy: command.EnableProxy,
+		Stdin:       command.Stdin,
+		TimeoutMS:   command.Timeout.Milliseconds(),
 	}
 }
 

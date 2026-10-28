@@ -52,12 +52,13 @@ func TestReadFrameRejectsOversizedFrame(t *testing.T) {
 
 func TestCommandSpecRoundTrip(t *testing.T) {
 	command := execution.Command{
-		Shell:   execution.ShellBash,
-		Script:  "true",
-		CWD:     t.TempDir(),
-		Env:     map[string]string{"A": "b"},
-		Stdin:   []byte("in"),
-		Timeout: 2500 * time.Millisecond,
+		Shell:       execution.ShellBash,
+		Script:      "true",
+		CWD:         t.TempDir(),
+		Env:         map[string]string{"A": "b"},
+		EnableProxy: true,
+		Stdin:       []byte("in"),
+		Timeout:     2500 * time.Millisecond,
 	}
 	spec := NewCommandSpec(command)
 	if spec.TimeoutMS != 2500 {
@@ -69,6 +70,9 @@ func TestCommandSpecRoundTrip(t *testing.T) {
 	}
 	if decoded.Timeout != command.Timeout || decoded.Script != command.Script || decoded.CWD != command.CWD {
 		t.Fatalf("decoded = %+v, want %+v", decoded, command)
+	}
+	if !decoded.EnableProxy {
+		t.Fatal("enable_proxy was not preserved")
 	}
 	if string(decoded.Stdin) != "in" || decoded.Env["A"] != "b" {
 		t.Fatalf("decoded stdin/env = %q/%v", decoded.Stdin, decoded.Env)
