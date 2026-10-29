@@ -4,7 +4,7 @@ import (
 	"net"
 	"testing"
 
-	"github.com/grandcat/zeroconf"
+	"github.com/weaming/zeroconf"
 )
 
 func TestParseEntry(t *testing.T) {

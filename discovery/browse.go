@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/grandcat/zeroconf"
+	"github.com/weaming/zeroconf"
 	"remote-shell/protocol"
 )
 

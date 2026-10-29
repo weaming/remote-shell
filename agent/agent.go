@@ -19,8 +19,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/grandcat/zeroconf"
 	"github.com/quic-go/quic-go"
+	"github.com/weaming/zeroconf"
 	"remote-shell/execution"
 	"remote-shell/identity"
 	"remote-shell/protocol"
