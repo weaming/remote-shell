@@ -5,7 +5,7 @@ go 1.27
 require (
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/quic-go/quic-go v0.64.1
-	github.com/weaming/zeroconf v1.0.1-0.20261029083148-9ba351654f46
+	github.com/weaming/zeroconf v1.1.1-0.20261029091513-3370f4d3580a
 )
 
 require (

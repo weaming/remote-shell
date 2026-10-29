@@ -340,9 +340,14 @@ func (s *Server) discoverNodes(ctx context.Context, _ *mcp.CallToolRequest, inpu
 }
 
 // describeNodeView renders one discovered agent as a key=value line. The
-// address list is capped so a prompt is not flooded; `more` carries the rest.
+// address list shows what a peer on this link can reach and is capped so a
+// prompt is not flooded; `more` carries the rest, and the structured reply keeps
+// every address.
 func describeNodeView(view nodeView) string {
-	shown := view.Addresses
+	shown := primaryAddresses(view.Addresses)
+	if len(shown) == 0 {
+		shown = view.Addresses
+	}
 	if len(shown) > maxShownAddresses {
 		shown = shown[:maxShownAddresses]
 	}
@@ -814,10 +819,98 @@ func (s *Server) dialTarget(ctx context.Context, selector string) (*client.Clien
 	return connection, target, nil
 }
 
+// defaultRouteIP returns the local address the kernel would use to leave this
+// host. A UDP dial resolves a route without sending a packet.
+func defaultRouteIP() net.IP {
+	conn, err := net.Dial("udp4", "1.1.1.1:53")
+	if err != nil {
+		return nil
+	}
+	defer conn.Close()
+	if addr, ok := conn.LocalAddr().(*net.UDPAddr); ok {
+		return addr.IP
+	}
+	return nil
+}
+
+// localSubnets lists the networks of the interface that carries target.
+func localSubnets(target net.IP) []*net.IPNet {
+	if target == nil {
+		return nil
+	}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	for _, iface := range ifaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		carries := false
+		for _, addr := range addrs {
+			if ipNet, ok := addr.(*net.IPNet); ok && ipNet.IP.Equal(target) {
+				carries = true
+				break
+			}
+		}
+		if !carries {
+			continue
+		}
+		subnets := make([]*net.IPNet, 0, len(addrs))
+		for _, addr := range addrs {
+			if ipNet, ok := addr.(*net.IPNet); ok {
+				subnets = append(subnets, ipNet)
+			}
+		}
+		return subnets
+	}
+	return nil
+}
+
+// inSubnets reports whether ip falls inside one of the networks.
+func inSubnets(ip net.IP, subnets []*net.IPNet) bool {
+	for _, subnet := range subnets {
+		if subnet.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// onDefaultLink reports whether a peer on the link this host leaves by can
+// reach the address without extra routing.
+func onDefaultLink(ip, local net.IP, subnets []*net.IPNet) bool {
+	return ip.IsLoopback() || (local != nil && ip.Equal(local)) || inSubnets(ip, subnets)
+}
+
+// primaryAddresses keeps the addresses a peer on the default-route link can
+// reach, so a reply lists what is useful instead of every address the host owns.
+func primaryAddresses(addresses []string) []string {
+	local := defaultRouteIP()
+	subnets := localSubnets(local)
+	kept := make([]string, 0, len(addresses))
+	for _, address := range addresses {
+		host, _, err := net.SplitHostPort(address)
+		if err != nil {
+			continue
+		}
+		ip := net.ParseIP(host)
+		// Link-local IPv6 needs a zone this bridge cannot carry, so it only
+		// clutters the summary; the structured reply still lists it.
+		if ip != nil && !ip.IsLinkLocalUnicast() && onDefaultLink(ip, local, subnets) {
+			kept = append(kept, address)
+		}
+	}
+	return kept
+}
+
 // preferAddresses ranks dial candidates: IPv4 first, then routable IPv6, then
 // link-local IPv6, which needs a scope this bridge cannot supply. IPv4 network
 // addresses (last octet 0) are dropped because nothing listens on them.
 func preferAddresses(addresses []string) []string {
+	local := defaultRouteIP()
+	subnets := localSubnets(local)
 	type ranked struct {
 		address string
 		rank    int
@@ -828,20 +921,33 @@ func preferAddresses(addresses []string) []string {
 		if err != nil {
 			continue
 		}
-		rank := 0
+		rank := 3
 		if parsed := net.ParseIP(host); parsed != nil {
 			switch {
+			case parsed.IsLoopback():
+				// Keeps its place next to the other addresses a peer can reach,
+				// so the caller's ordering still decides between them.
+				rank = 1
 			case parsed.To4() != nil:
 				if parsed.To4()[3] == 0 {
 					continue
 				}
-				rank = 0
+				// Addresses on the link this host leaves by are the ones a peer
+				// can actually answer, so they win over the rest of the host's
+				// addresses (VPN, container bridges, extra NICs).
+				if onDefaultLink(parsed, local, subnets) {
+					rank = 1
+				} else {
+					rank = 2
+				}
 			case parsed.IsLinkLocalUnicast():
-				rank = 2
-			case parsed.IsLoopback():
-				rank = 0
+				rank = 4
 			default:
-				rank = 1
+				if onDefaultLink(parsed, local, subnets) {
+					rank = 1
+				} else {
+					rank = 3
+				}
 			}
 		}
 		items = append(items, ranked{address: address, rank: rank})

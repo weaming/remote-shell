@@ -22,8 +22,8 @@ github.com/segmentio/encoding v0.5.4 h1:OW1VRern8Nw6ITAtwSZ7Idrl3MXCFwXHPgqESYfv
 github.com/segmentio/encoding v0.5.4/go.mod h1:HS1ZKa3kSN32ZHVZ7ZLPLXWvOVIiZtyJnO1gPH1sKt0=
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
-github.com/weaming/zeroconf v1.0.1-0.20261029083148-9ba351654f46 h1:lpzRqZQ3CROKVAdvv4uEUCevi/opnHVq3zeAHRjKBpk=
-github.com/weaming/zeroconf v1.0.1-0.20261029083148-9ba351654f46/go.mod h1:eRZGuQEiTOlEte0osU7YIPKW3DCBCraSofcS5Ni1trM=
+github.com/weaming/zeroconf v1.1.1-0.20261029091513-3370f4d3580a h1:5PRaBgbXQ14cSMPp6jYolBsyXByU5DbRN9drrucrp4w=
+github.com/weaming/zeroconf v1.1.1-0.20261029091513-3370f4d3580a/go.mod h1:0D/egApbU0V7CFAWrYBPCqJgM+K3wEcekpJDBwgqov4=
 github.com/yosida95/uritemplate/v3 v3.0.2 h1:Ed3Oyj9yrmi9087+NczuL5BwkIc4wvTb5zIM+UJPGz4=
 github.com/yosida95/uritemplate/v3 v3.0.2/go.mod h1:ILOh0sOhIJR3+L/8afwt/kE++YT040gmv5BQTMR2HP4=
 go.uber.org/mock v0.5.2 h1:LbtPTcP8A5k9WPXj54PPPbjcI4Y6lhyOZXn+VS7wNko=
