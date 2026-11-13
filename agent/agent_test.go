@@ -1039,3 +1039,38 @@ func parseRequestLogs(output string) (map[string][]map[string]string, []map[stri
 	}
 	return runs, instant
 }
+
+func TestPublishableIface(t *testing.T) {
+	// Linux tun/wg 设备没有 IFF_MULTICAST，但上面的地址（EasyTier 虚拟 IP）
+	// 恰恰是远端唯一能拨到的，必须一起发布。
+	cases := []struct {
+		name  string
+		flags net.Flags
+		want  bool
+	}{
+		{"lan", net.FlagUp | net.FlagBroadcast | net.FlagMulticast, true},
+		{"tun", net.FlagUp | net.FlagPointToPoint, true},
+		{"down", net.FlagBroadcast | net.FlagMulticast, false},
+		{"loopback", net.FlagUp | net.FlagLoopback, false},
+	}
+	for _, c := range cases {
+		if got := publishableIface(net.Interface{Name: c.name, Flags: c.flags}); got != c.want {
+			t.Errorf("publishableIface(%s, %v) = %v，期望 %v", c.name, c.flags, got, c.want)
+		}
+	}
+}
+
+func TestPublishableAddressesIncludesNonMulticast(t *testing.T) {
+	addresses, err := publishableAddresses()
+	if err != nil {
+		t.Skipf("本机没有可发布地址: %v", err)
+	}
+	if len(addresses) == 0 {
+		t.Fatal("应至少发布一个地址")
+	}
+	for _, address := range addresses {
+		if net.ParseIP(address) == nil {
+			t.Errorf("非法地址 %q", address)
+		}
+	}
+}

@@ -327,7 +327,7 @@ func systemHostName() string {
 }
 
 // publishableAddresses lists the unicast addresses to publish for the host
-// record, skipping loopback and interfaces without multicast.
+// record, skipping loopback and interfaces that are down.
 func publishableAddresses() ([]string, error) {
 	interfaces, err := net.Interfaces()
 	if err != nil {
@@ -335,10 +335,7 @@ func publishableAddresses() ([]string, error) {
 	}
 	addresses := make([]string, 0, 4)
 	for _, iface := range interfaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagMulticast == 0 {
-			continue
-		}
-		if iface.Flags&net.FlagLoopback != 0 {
+		if !publishableIface(iface) {
 			continue
 		}
 		assigned, err := iface.Addrs()
@@ -354,9 +351,17 @@ func publishableAddresses() ([]string, error) {
 		}
 	}
 	if len(addresses) == 0 {
-		return nil, fmt.Errorf("no multicast interface with an address to advertise")
+		return nil, fmt.Errorf("no interface with an address to advertise")
 	}
 	return addresses, nil
+}
+
+// publishableIface reports whether addresses of this interface can be published.
+// IFF_MULTICAST is deliberately not required: Linux tun and wireguard devices
+// never set it, yet the addresses mesh VPNs assign to them are the ones a remote
+// peer can dial.
+func publishableIface(iface net.Interface) bool {
+	return iface.Flags&net.FlagUp != 0 && iface.Flags&net.FlagLoopback == 0
 }
 
 func (a *Agent) handleConnection(serverCtx context.Context, connection *quic.Conn) {
